@@ -13,6 +13,12 @@ class MMU3:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.query_endstops = self.printer.load_object(config, "query_endstops")
+        self.gcode = self.printer.lookup_object("gcode")
+
+        self._mcu = None
+        self._toolhead = None
+        self._pulley_stepper = None
+        self._pulley_stepper_endstop = None
 
         # load config values
         # timeouts
@@ -65,7 +71,44 @@ class MMU3:
     def register_commands(self):
         """Register new GCode commands."""
         gcode = self.printer.lookup_object("gcode")
-        gcode.register_command("LOAD_FILAMENT_TO_PINDA_PY", self.load_filament_to_pinda_py)
+        gcode.register_command(
+            "LOAD_FILAMENT_TO_PINDA_IN_LOOP",
+            self.load_filament_to_pinda_in_loop
+        )
+
+    @property
+    def toolhead(self):
+        """Return the toolhead."""
+        if self._toolhead is None:
+            self._toolhead = self.printer.lookup_object("toolhead")
+        return self._toolhead
+
+    @property
+    def pulley_stepper_endstop(self):
+        """Return pulley stepper endstop."""
+        if self._pulley_stepper_endstop is None:
+            self._pulley_stepper_endstop = self.get_endstop(PULLEY_STEPPER_NAME)
+            # self.gcode.respond_info(f"MMU3: self._pulley_stepper_endstop.__class__.__name__: {self._pulley_stepper_endstop.__class__.__name__}")
+            # self.gcode.respond_info(f"MMU3: dir(self._pulley_stepper_endstop): {dir(self._pulley_stepper_endstop)}")
+        return self._pulley_stepper_endstop
+
+    @property
+    def pulley_stepper(self):
+        """Return pulley stepper."""
+        if self._pulley_stepper is None:
+            steppers = self.pulley_stepper_endstop.get_steppers()
+            for stepper in steppers:
+                self.gcode.respond_info(f"MMU3: stepper.__class__.__name__: {stepper.__class__.__name__}")
+                self.gcode.respond_info(f"MMU3: dir(stepper): {dir(stepper)}")
+
+    @property
+    def mcu(self):
+        """Return the mcu."""
+        if not self._mcu:
+            self._mcu = self.pulley_stepper_endstop.get_mcu()
+            # self.gcode.respond_info(f"MMU3: self.mcu.__class__.__name__: {self._mcu.__class__.__name__}")
+            # self.gcode.respond_info(f"MMU3: dir(self.mcu): {dir(self._mcu)}")
+        return self._mcu
 
     def get_endstop(self, endstop_name: str) -> None | MCU_endstop:
         """Return the endstop with the given name.
@@ -81,16 +124,14 @@ class MMU3:
                 return endstop[0]
         return None
 
-    def load_filament_to_pinda_py(self, gcmd):
-        gcode = self.printer.lookup_object("gcode")
-        gcode.respond_info("Pinda endstop not triggered. Retrying...")
-        pulley_stepper_endstop = self.get_endstop(PULLEY_STEPPER_NAME)
-        toolhead = self.printer.lookup_object("toolhead")
+    def load_filament_to_pinda_in_loop(self, gcmd):
+        # _ = self.mcu
+        # _ = self.pulley_stepper
         while True:
-            gcode.run_script_from_command(
+            self.gcode.run_script_from_command(
                 "MANUAL_STEPPER STEPPER=pulley_stepper SET_POSITION=0"
             )
-            gcode.run_script_from_command(
+            self.gcode.run_script_from_command(
                 "MANUAL_STEPPER "
                 "STEPPER=pulley_stepper "
                 f"MOVE={self.pinda_load_length} "
@@ -98,17 +139,16 @@ class MMU3:
                 f"ACCEL={self.pinda_load_accel} "
                 "STOP_ON_ENDSTOP=2"
             )
-            gcode.run_script_from_command("M400")
-
+            self.gcode.run_script_from_command("M400")
             # check endstop status and exit from the loop
-            print_time = toolhead.get_last_move_time()
-            pulley_endstop_status = pulley_stepper_endstop.query_endstop(print_time)
+            print_time = self.toolhead.get_last_move_time()
+            pulley_endstop_status = self.pulley_stepper_endstop.query_endstop(print_time)
 
             if pulley_endstop_status:
-                gcode.respond_info("Pinda endstop triggered. Exiting filament load.")
+                gcmd.respond_info("MMU3: Pinda endstop triggered. Exiting filament load.")
                 break
             else:
-                gcode.respond_info("Pinda endstop not triggered. Retrying...")
+                gcmd.respond_info("MMU3: Pinda endstop not triggered. Retrying...")
             i += 1
 
 
