@@ -161,8 +161,6 @@ class MMU3:
         """Return the mcu."""
         if not self._mcu:
             self._mcu = self.pulley_stepper_endstop.get_mcu()
-            # self.gcode.respond_info(f"MMU3: self.mcu.__class__.__name__: {self._mcu.__class__.__name__}")
-            # self.gcode.respond_info(f"MMU3: dir(self.mcu): {dir(self._mcu)}")
         return self._mcu
 
     def get_endstop(self, endstop_name: str) -> None | MCU_endstop:
@@ -208,16 +206,16 @@ class MMU3:
         print_time = self.toolhead.get_last_move_time()
 
         # Report results
-        gcmd.respond_info("Endstop status")
-        gcmd.respond_info("==============")
-        gcmd.respond_info(f"Extruder : {self.is_filament_present_in_extruder}")
+        gcmd.respond_info("MMU3: Endstop status")
+        gcmd.respond_info("MMU3: ==============")
+        gcmd.respond_info(f"MMU3: Extruder : {self.is_filament_present_in_extruder}")
         gcmd.respond_info(
-            f"{STEPPER_NAME_MAP[PULLEY_STEPPER_NAME]} : "
+            f"MMU3: {STEPPER_NAME_MAP[PULLEY_STEPPER_NAME]} : "
             f"{self.pulley_stepper_endstop.query_endstop(print_time)}"
         )
         # gcmd.respond_info(f"is_filament_in_pinda: {self.is_filament_in_pinda}")
         gcmd.respond_info(
-            f"{STEPPER_NAME_MAP[SELECTOR_STEPPER_NAME]} : "
+            f"MMU3: {STEPPER_NAME_MAP[SELECTOR_STEPPER_NAME]} : "
             f"{self.selector_stepper_endstop.query_endstop(print_time)}"
         )
 
@@ -230,7 +228,7 @@ class MMU3:
             gcmd (GcodeCommand): The G-code command.
         """
         # # Home the idler
-        gcmd.respond_info("Homing idler")
+        gcmd.respond_info("MMU3: Homing idler")
         self.idler_stepper.set_position([0])
         self.idler_stepper.do_move(
             7,
@@ -258,27 +256,22 @@ class MMU3:
         Args:
             gcmd (GCodeCommand): The G-code command.
         """
-        # _ = self.mcu
-        # _ = self.pulley_stepper
         while True:
-            self.gcode.run_script_from_command(
-                "MANUAL_STEPPER STEPPER=pulley_stepper SET_POSITION=0"
+            self.pulley_stepper.set_position([0])
+            self.pulley_stepper.do_homing_move(
+                self.pinda_load_length,
+                self.pinda_load_speed,
+                self.pinda_load_accel,
+                True,
+                False
             )
-            self.gcode.run_script_from_command(
-                "MANUAL_STEPPER "
-                "STEPPER=pulley_stepper "
-                f"MOVE={self.pinda_load_length} "
-                f"SPEED={self.pinda_load_speed} "
-                f"ACCEL={self.pinda_load_accel} "
-                "STOP_ON_ENDSTOP=2"
-            )
-            self.gcode.run_script_from_command("M400")
+            self.toolhead.wait_moves()
+
             # check endstop status and exit from the loop
             print_time = self.toolhead.get_last_move_time()
             pulley_endstop_status = self.pulley_stepper_endstop.query_endstop(
                 print_time
             )
-
             if pulley_endstop_status:
                 gcmd.respond_info(
                     "MMU3: Pinda endstop triggered. Exiting filament load."
@@ -286,7 +279,6 @@ class MMU3:
                 break
             else:
                 gcmd.respond_info("MMU3: Pinda endstop not triggered. Retrying...")
-            i += 1
 
 
 def load_config_prefix(config):
