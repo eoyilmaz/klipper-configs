@@ -5,10 +5,11 @@ from typing import TYPE_CHECKING
 from . import filament_switch_sensor
 
 if TYPE_CHECKING:
+    from extras.manual_stepper import ManualStepper
     from gcode import GCodeCommand
     from mcu import MCU_endstop
 
-
+IDLER_STEPPER_NAME = "manual_stepper idler_stepper"
 PULLEY_STEPPER_NAME = "manual_stepper pulley_stepper"
 SELECTOR_STEPPER_NAME = "manual_stepper selector_stepper"
 
@@ -26,10 +27,14 @@ class MMU3:
 
         self._mcu = None
         self._toolhead = None
+        self._idler_stepper = None
+        self._idler_stepper_endstop = None
         self._pulley_stepper = None
         self._pulley_stepper_endstop = None
         self._selector_stepper = None
         self._selector_stepper_endstop = None
+
+        self.is_paused = False
 
         # load config values
         # timeouts
@@ -64,11 +69,11 @@ class MMU3:
         )
         self.idler_unload_speed = config.getint("idler_unload_speed", 30)
         # pause values
-        self.pause_before_disabling_steppers = config.getint(
-            "pause_before_disabling_steppers", 50
+        self.pause_before_disabling_steppers = (
+            config.getint("pause_before_disabling_steppers", 50) / 1000.0
         )
-        self.pause_after_disabling_steppers = config.getint(
-            "pause_after_disabling_steppers", 200
+        self.pause_after_disabling_steppers = (
+            config.getint("pause_after_disabling_steppers", 200) / 1000.0
         )
         self.pause_x = config.getfloat("pause_x", 0)
         self.pause_y = config.getfloat("pause_y", 200)
@@ -95,6 +100,7 @@ class MMU3:
             "LOAD_FILAMENT_TO_PINDA_IN_LOOP", self.load_filament_to_pinda_in_loop
         )
         self.gcode.register_command("ENDSTOPS_STATUS", self.endstops_status)
+        self.gcode.register_command("HOME_IDLER", self.home_idler)
 
     @property
     def toolhead(self):
@@ -104,15 +110,17 @@ class MMU3:
         return self._toolhead
 
     @property
-    def pulley_stepper(self) -> None | object:
+    def idler_stepper(self) -> ManualStepper:
+        """Return idler stepper."""
+        if self._idler_stepper is None:
+            self._idler_stepper = self.printer.lookup_object(IDLER_STEPPER_NAME)
+        return self._idler_stepper
+
+    @property
+    def pulley_stepper(self) -> ManualStepper:
         """Return pulley stepper."""
         if self._pulley_stepper is None:
-            steppers = self.pulley_stepper_endstop.get_steppers()
-            for stepper in steppers:
-                self.gcode.respond_info(
-                    f"MMU3: stepper.__class__.__name__: {stepper.__class__.__name__}"
-                )
-                self.gcode.respond_info(f"MMU3: dir(stepper): {dir(stepper)}")
+            self._pulley_stepper = self.printer.lookup_object(PULLEY_STEPPER_NAME)
         return self._pulley_stepper
 
     @property
@@ -125,6 +133,17 @@ class MMU3:
         if self._pulley_stepper_endstop is None:
             self._pulley_stepper_endstop = self.get_endstop(PULLEY_STEPPER_NAME)
         return self._pulley_stepper_endstop
+
+    @property
+    def selector_stepper(self) -> ManualStepper:
+        """Return the selector stepper.
+
+        Returns:
+            ManualStepper: The selector stepper.
+        """
+        if self._selector_stepper is None:
+            self._selector_stepper = self.printer.lookup_object(SELECTOR_STEPPER_NAME)
+        return self._selector_stepper
 
     @property
     def selector_stepper_endstop(self) -> MCU_endstop:
@@ -180,7 +199,11 @@ class MMU3:
         return bool(self.pulley_stepper_endstop.query_endstop(print_time))
 
     def endstops_status(self, gcmd) -> None:
-        """Print the status of all endstops."""
+        """Print the status of all endstops.
+
+        Args:
+            gcmd (GcodeCommand): The G-code command.
+        """
         # Query the endstops
         print_time = self.toolhead.get_last_move_time()
 
@@ -197,6 +220,37 @@ class MMU3:
             f"{STEPPER_NAME_MAP[SELECTOR_STEPPER_NAME]} : "
             f"{self.selector_stepper_endstop.query_endstop(print_time)}"
         )
+
+        # _ = self.idler_stepper
+
+    def home_idler(self, gcmd) -> None:
+        """Home the idler
+
+        Args:
+            gcmd (GcodeCommand): The G-code command.
+        """
+        # # Home the idler
+        gcmd.respond_info("Homing idler")
+        self.idler_stepper.set_position([0])
+        self.idler_stepper.do_move(
+            7,
+            self.idler_stepper.velocity,
+            self.idler_stepper.accel,
+        )
+        self.idler_stepper.do_move(
+            -95,
+            self.idler_stepper.velocity,
+            self.idler_stepper.accel,
+        )
+        self.idler_stepper.set_position([2])
+        self.idler_stepper.do_move(
+            self.idler_home_position,
+            self.idler_stepper.velocity,
+            self.idler_stepper.accel,
+        )
+        self.idler_stepper.dwell(self.pause_before_disabling_steppers)
+        self.idler_stepper.do_enable(False)
+        self.idler_stepper.dwell(self.pause_after_disabling_steppers)
 
     def load_filament_to_pinda_in_loop(self, gcmd: GCodeCommand) -> None:
         """Load the filament to pinda in a infinite loop.
