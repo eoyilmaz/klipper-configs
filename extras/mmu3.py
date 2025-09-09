@@ -24,7 +24,7 @@ PULLEY_STEPPER_NAME = "manual_stepper pulley_stepper"
 SELECTOR_STEPPER_NAME = "manual_stepper selector_stepper"
 
 STEPPER_NAME_MAP = {
-    PULLEY_STEPPER_NAME: "PINDA",
+    PULLEY_STEPPER_NAME: "FINDA",
     SELECTOR_STEPPER_NAME: "Selector",
 }
 
@@ -107,14 +107,14 @@ class MMU3:
         self.bowden_unload_length = config.getfloat("bowden_unload_length", 830)
         self.bowden_unload_speed = config.getint("bowden_unload_speed", 120)
         self.bowden_unload_accel = config.getint("bowden_unload_accel", 120)
-        # pinda load/unload
-        self.pinda_endstop = None
-        self.pinda_load_length = config.getfloat("pinda_load_length", 120)
-        self.pinda_unload_length = config.getfloat("pinda_unload_length", 35)
-        self.pinda_load_speed = config.getint("pinda_load_speed", 20)
-        self.pinda_unload_speed = config.getint("pinda_unload_speed", 20)
-        self.pinda_load_accel = config.getint("pinda_load_accel", 50)
-        self.pinda_unload_accel = config.getint("pinda_unload_accel", 50)
+        # finda load/unload
+        self.finda_endstop = None
+        self.finda_load_length = config.getfloat("finda_load_length", 120)
+        self.finda_unload_length = config.getfloat("finda_unload_length", 35)
+        self.finda_load_speed = config.getint("finda_load_speed", 20)
+        self.finda_unload_speed = config.getint("finda_unload_speed", 20)
+        self.finda_load_accel = config.getint("finda_load_accel", 50)
+        self.finda_unload_accel = config.getint("finda_unload_accel", 50)
         # selector
         self.selector_positions = [
             float(f.strip())
@@ -147,7 +147,7 @@ class MMU3:
         self.extruder_eject_temp = config.getint("extruder_eject_temp", 200)
         # other options
         self.enable_5in1: bool = config.getboolean("enable_5in1", False)
-        self.pinda_load_retry = config.getint("pinda_load_retry", 20)
+        self.finda_load_retry = config.getint("finda_load_retry", 20)
         self.load_retry = config.getint("load_retry", 5)
         self.unload_retry = config.getint("unload_retry", 5)
         self.filament_sensor_name = config.get(
@@ -185,7 +185,7 @@ class MMU3:
     def register_commands(self) -> None:
         """Register new GCode commands."""
         self.gcode.register_command(
-            "LOAD_FILAMENT_TO_PINDA_IN_LOOP", self.cmd_load_filament_to_pinda_in_loop
+            "LOAD_FILAMENT_TO_FINDA_IN_LOOP", self.cmd_load_filament_to_finda_in_loop
         )
         self.gcode.register_command("ENDSTOPS_STATUS", self.cmd_endstops_status)
         self.gcode.register_command("HOME_IDLER", self.cmd_home_idler)
@@ -221,21 +221,21 @@ class MMU3:
             self.cmd_unload_filament_in_extruder_with_ramming,
         )
         self.gcode.register_command(
-            "LOAD_FILAMENT_TO_PINDA", self.cmd_load_filament_to_pinda
+            "LOAD_FILAMENT_TO_FINDA", self.cmd_load_filament_to_finda
         )
         self.gcode.register_command(
-            "LOAD_FILAMENT_FROM_PINDA_TO_EXTRUDER",
-            self.cmd_load_filament_from_pinda_to_extruder,
+            "LOAD_FILAMENT_FROM_FINDA_TO_EXTRUDER",
+            self.cmd_load_filament_from_finda_to_extruder,
         )
         self.gcode.register_command(
             "LOAD_FILAMENT_TO_EXTRUDER", self.cmd_load_filament_to_extruder
         )
         self.gcode.register_command(
-            "UNLOAD_FILAMENT_FROM_PINDA", self.cmd_unload_filament_from_pinda
+            "UNLOAD_FILAMENT_FROM_FINDA", self.cmd_unload_filament_from_finda
         )
         self.gcode.register_command(
-            "UNLOAD_FILAMENT_FROM_EXTRUDER_TO_PINDA",
-            self.cmd_unload_filament_from_extruder_to_pinda,
+            "UNLOAD_FILAMENT_FROM_EXTRUDER_TO_FINDA",
+            self.cmd_unload_filament_from_extruder_to_finda,
         )
         self.gcode.register_command(
             "UNLOAD_FILAMENT_FROM_EXTRUDER", self.cmd_unload_filament_from_extruder
@@ -379,11 +379,11 @@ class MMU3:
         return self.filament_sensor.get_status(None)["filament_detected"]
 
     @property
-    def is_filament_in_pinda(self) -> bool:
-        """Return if the filament is in pinda or not.
+    def is_filament_in_finda(self) -> bool:
+        """Return if the filament is in finda or not.
 
         Returns:
-            bool: True if the filament is present in pinda, False otherwise.
+            bool: True if the filament is present in finda, False otherwise.
         """
         print_time = self.toolhead.get_last_move_time()
         return bool(self.pulley_stepper_endstop.query_endstop(print_time))
@@ -406,7 +406,7 @@ class MMU3:
         """Validate filament is not stuck in extruder.
 
         Returns:
-            bool: True if the filament is not present in pinda, False otherwise.
+            bool: True if the filament is not present in finda, False otherwise.
         """
         self.respond_info("Checking if filament stuck in extruder")
         if self.is_filament_present_in_extruder:
@@ -416,32 +416,32 @@ class MMU3:
         self.respond_info("Filament not in extruder")
         return True
 
-    def validate_filament_is_in_pinda(self) -> bool:
-        """Validate filament is in PINDA.
+    def validate_filament_is_in_finda(self) -> bool:
+        """Validate filament is in FINDA.
 
         Returns:
-            bool: True if filament is in pinda, False otherwise.
+            bool: True if filament is in finda, False otherwise.
         """
-        self.respond_info("Checking if filament in PINDA")
-        if not self.is_filament_in_pinda:
-            self.respond_info("Filament not in PINDA")
+        self.respond_info("Checking if filament in FINDA")
+        if not self.is_filament_in_finda:
+            self.respond_info("Filament not in FINDA")
             self.pause()
             return False
-        self.respond_info("Filament in PINDA")
+        self.respond_info("Filament in FINDA")
         return True
 
-    def validate_filament_not_stuck_in_pinda(self) -> bool:
-        """Validate filament is not stuck in PINDA.
+    def validate_filament_not_stuck_in_finda(self) -> bool:
+        """Validate filament is not stuck in FINDA.
 
         Returns:
-            bool: True if filament is not stuck in PINDA, False otherwise.
+            bool: True if filament is not stuck in FINDA, False otherwise.
         """
-        self.respond_info("Checking if filament stuck in PINDA")
-        if self.is_filament_in_pinda:
-            self.respond_info("Filament stuck in PINDA")
+        self.respond_info("Checking if filament stuck in FINDA")
+        if self.is_filament_in_finda:
+            self.respond_info("Filament stuck in FINDA")
             self.pause()
             return False
-        self.respond_info("Filament not in PINDA")
+        self.respond_info("Filament not in FINDA")
         return True
 
     def validate_hotend_is_hot_enough(self) -> bool:
@@ -525,7 +525,7 @@ class MMU3:
 
         1) home the idler
         2) home the selector (if needed)
-        3) try to load filament 0 to PINDA and then unload it. Used to verify
+        3) try to load filament 0 to FINDA and then unload it. Used to verify
            the MMU3 gear
 
         if all is ok, the MMU3 is ready to be used
@@ -571,33 +571,33 @@ class MMU3:
 
         return True
 
-    def load_filament_to_pinda_in_loop(self) -> bool:
-        """Load the filament to pinda in a infinite loop.
+    def load_filament_to_finda_in_loop(self) -> bool:
+        """Load the filament to finda in a infinite loop.
 
         Args:
             gcmd (GCodeCommand): The G-code command.
 
         Returns:
-            bool: True, if filament loaded to pinda, False otherwise.
+            bool: True, if filament loaded to finda, False otherwise.
         """
-        for i in range(self.pinda_load_retry):
+        for i in range(self.finda_load_retry):
             self.pulley_stepper.do_set_position(0)
             self.pulley_stepper.do_homing_move(
-                self.pinda_load_length,
-                self.pinda_load_speed,
-                self.pinda_load_accel,
+                self.finda_load_length,
+                self.finda_load_speed,
+                self.finda_load_accel,
                 True,
                 False,
             )
             self.toolhead.wait_moves()
 
             # check endstop status and exit from the loop
-            if self.is_filament_in_pinda:
-                self.respond_info("Pinda endstop triggered. Exiting filament load.")
+            if self.is_filament_in_finda:
+                self.respond_info("Finda endstop triggered. Exiting filament load.")
                 return True
-            self.respond_info(f"Pinda endstop not triggered. Retrying... {i}")
+            self.respond_info(f"Finda endstop not triggered. Retrying... {i}")
         self.respond_info(
-            f"Couldn't load filament to pinda after {self.pinda_load_retry}!"
+            f"Couldn't load filament to finda after {self.finda_load_retry}!"
         )
         self.pause()
         return False
@@ -1002,14 +1002,14 @@ class MMU3:
         self.respond_info("Filament rammed and removed")
         return True
 
-    def load_filament_to_pinda(self) -> bool:
-        """Load filament until the PINDA detect it.
+    def load_filament_to_finda(self) -> bool:
+        """Load filament until the FINDA detect it.
 
         Then push it 10mm more to be sure is well detected.
-        PAUSE_MMU is called if the PINDA does not detect the filament
+        PAUSE_MMU is called if the FINDA does not detect the filament
 
         Returns:
-            bool: True, if the filament is loaded to pinda, False otherwise.
+            bool: True, if the filament is loaded to finda, False otherwise.
         """
         if self.is_paused:
             return False
@@ -1017,11 +1017,11 @@ class MMU3:
         self.respond_debug(f"self.current_tool    : {self.current_tool}")
         self.respond_debug(f"self.current_filament: {self.current_filament}")
         if self.current_tool is None:
-            self.respond_info("Cannot load to PINDA, tool not selected !!")
+            self.respond_info("Cannot load to FINDA, tool not selected !!")
             return False
 
-        self.respond_info("Loading filament to PINDA ...")
-        if not self.load_filament_to_pinda_in_loop():
+        self.respond_info("Loading filament to FINDA ...")
+        if not self.load_filament_to_finda_in_loop():
             return False
 
         self.pulley_stepper.do_set_position(0)
@@ -1037,20 +1037,20 @@ class MMU3:
         self.respond_debug(f"self.current_tool    : {self.current_tool}")
         self.respond_debug(f"self.current_filament: {self.current_filament}")
 
-        if not self.validate_filament_is_in_pinda():
+        if not self.validate_filament_is_in_finda():
             return False
 
         self.current_filament = self.current_tool
-        self.respond_info("Loading done to PINDA")
+        self.respond_info("Loading done to FINDA")
         self.respond_debug(f"self.current_tool    : {self.current_tool}")
         self.respond_debug(f"self.current_filament: {self.current_filament}")
         return True
 
-    def load_filament_from_pinda_to_extruder(self) -> bool:
-        """Load from the PINDA to the extruder gear.
+    def load_filament_from_finda_to_extruder(self) -> bool:
+        """Load from the FINDA to the extruder gear.
 
         Returns:
-            bool: True, if filament is loaded from pinda to extruder, False
+            bool: True, if filament is loaded from finda to extruder, False
                 otherwise.
         """
         if self.is_paused:
@@ -1060,7 +1060,7 @@ class MMU3:
             self.respond_info("Cannot load to extruder, tool not selected !!")
             return False
 
-        self.respond_info("Loading filament from PINDA to extruder ...")
+        self.respond_info("Loading filament from FINDA to extruder ...")
         self.pulley_stepper.do_set_position(0)
         self.pulley_stepper.do_move(
             self.bowden_load_length1,
@@ -1076,15 +1076,15 @@ class MMU3:
         self.pulley_stepper.dwell(self.pause_before_disabling_steppers)
         self.pulley_stepper.do_enable(False)
         self.pulley_stepper.dwell(self.pause_after_disabling_steppers)
-        self.respond_info("Loading done from PINDA to extruder")
+        self.respond_info("Loading done from FINDA to extruder")
 
         return True
 
     def load_filament_to_extruder(self) -> bool:
-        """Load from MMU3 to extruder gear by calling LOAD_FILAMENT_TO_PINDA.
+        """Load from MMU3 to extruder gear by calling LOAD_FILAMENT_TO_FINDA.
 
-        Then LOAD_FILAMENT_FROM_PINDA_TO_EXTRUDER.
-        PAUSE_MMU is called if the PINDA does not detect the filament.
+        Then LOAD_FILAMENT_FROM_FINDA_TO_EXTRUDER.
+        PAUSE_MMU is called if the FINDA does not detect the filament.
 
         Args:
             bool: True, if filament is loaded to extruder
@@ -1097,64 +1097,64 @@ class MMU3:
             return False
 
         self.respond_info("Loading filament from MMU to extruder ...")
-        if self.enable_5in1 is False and not self.load_filament_to_pinda():
+        if self.enable_5in1 is False and not self.load_filament_to_finda():
             return False
 
-        if self.load_filament_from_pinda_to_extruder():
+        if self.load_filament_from_finda_to_extruder():
             self.respond_info("Loading done from MMU to extruder")
             return True
-        # there should be an error about loading from pinda to extruder
+        # there should be an error about loading from finda to extruder
         return False
 
-    def unload_filament_from_pinda(self) -> None:
-        """Unload filament until the PINDA detect it.
+    def unload_filament_from_finda(self) -> None:
+        """Unload filament until the FINDA detect it.
 
         Then push it -10mm more to be sure is well not detected.
-        PAUSE_MMU is called if the PINDA does detect the filament.
+        PAUSE_MMU is called if the FINDA does detect the filament.
 
         Returns:
-            bool: True, if filament unloaded from pinda, False otherwise.
+            bool: True, if filament unloaded from finda, False otherwise.
         """
         if self.is_paused:
             return False
 
         if self.current_tool is None:
-            self.respond_info("Cannot unload from PINDA, tool not selected !!")
+            self.respond_info("Cannot unload from FINDA, tool not selected !!")
             return False
 
-        self.respond_info("Unloading filament from PINDA ...")
+        self.respond_info("Unloading filament from FINDA ...")
         self.pulley_stepper.do_set_position(0)
         self.pulley_stepper.do_move(
-            -self.pinda_unload_length,
-            self.pinda_unload_speed,
-            self.pinda_unload_accel,
+            -self.finda_unload_length,
+            self.finda_unload_speed,
+            self.finda_unload_accel,
         )
         self.pulley_stepper.do_set_position(0)
         self.pulley_stepper.dwell(self.pause_before_disabling_steppers)
         self.pulley_stepper.do_enable(False)
         self.pulley_stepper.dwell(self.pause_after_disabling_steppers)
-        if not self.validate_filament_not_stuck_in_pinda():
+        if not self.validate_filament_not_stuck_in_finda():
             return False
         self.current_filament = None
-        self.respond_info("Unloading done from PINDA")
+        self.respond_info("Unloading done from FINDA")
         return True
 
-    def unload_filament_from_extruder_to_pinda(self) -> bool:
-        """Unload from extruder gear to the PINDA.
+    def unload_filament_from_extruder_to_finda(self) -> bool:
+        """Unload from extruder gear to the FINDA.
 
         Returns:
-            bool: True, if filament unloaded from extruder to pinda.
+            bool: True, if filament unloaded from extruder to finda.
         """
         if self.is_paused:
             return False
 
         if self.current_tool is None:
             self.respond_info(
-                "Cannot unload from extruder to PINDA, tool not selected !!"
+                "Cannot unload from extruder to FINDA, tool not selected !!"
             )
             return False
 
-        self.respond_info("Unloading filament from extruder to PINDA ...")
+        self.respond_info("Unloading filament from extruder to FINDA ...")
         self.pulley_stepper.do_set_position(0)
         if not self.enable_5in1:
             self.pulley_stepper.do_homing_move(
@@ -1171,7 +1171,7 @@ class MMU3:
             #     False,
             #     False,
             # )
-            if not self.validate_filament_not_stuck_in_pinda():
+            if not self.validate_filament_not_stuck_in_finda():
                 return False
         else:
             self.pulley_stepper.do_move(
@@ -1182,14 +1182,14 @@ class MMU3:
         self.pulley_stepper.dwell(self.pause_before_disabling_steppers)
         self.pulley_stepper.do_enable(False)
         self.pulley_stepper.dwell(self.pause_after_disabling_steppers)
-        self.respond_info("Unloading done from PINDA to extruder")
+        self.respond_info("Unloading done from FINDA to extruder")
         return True
 
     def unload_filament_from_extruder(self) -> bool:
         """Unload from the extruder gear to the MMU3.
 
-        Do it by calling UNLOAD_FILAMENT_FROM_EXTRUDER_TO_PINDA and
-        then UNLOAD_FILAMENT_FROM_PINDA
+        Do it by calling UNLOAD_FILAMENT_FROM_EXTRUDER_TO_FINDA and
+        then UNLOAD_FILAMENT_FROM_FINDA
 
         Returns:
             bool: True, if filament unloaded from the extruder, False otherwise.
@@ -1204,14 +1204,14 @@ class MMU3:
             return False
 
         self.respond_info("Unloading filament from extruder to MMU ...")
-        if not self.unload_filament_from_extruder_to_pinda():
+        if not self.unload_filament_from_extruder_to_finda():
             return False
 
         if self.enable_5in1:
             self.respond_info("Unloading done from extruder to MMU")
             return True
 
-        if not self.unload_filament_from_pinda():
+        if not self.unload_filament_from_finda():
             return False
 
         self.respond_info("Unloading done from extruder to MMU")
@@ -1283,8 +1283,8 @@ class MMU3:
             # else:
             #     self.current_tool = None
             #     return False
-            if self.is_filament_in_pinda:
-                self.respond_info("But there is a filament in PINDA!")
+            if self.is_filament_in_finda:
+                self.respond_info("But there is a filament in FINDA!")
                 if self.current_tool is None:
                     self.respond_info("Current Tool is also None!")
                     self.respond_info("Cancelling unload!!!")
@@ -1295,8 +1295,8 @@ class MMU3:
                     f"Also setting Current filament to {self.current_filament}"
                 )
                 return True
-            # filament is not in pinda
-            self.respond_info("And no filament in PINDA")
+            # filament is not in finda
+            self.respond_info("And no filament in FINDA")
             self.respond_info("No need to unload!")
             return True
 
@@ -1349,10 +1349,10 @@ class MMU3:
                 return False
 
         if not self.enable_5in1:
-            if self.is_filament_in_pinda:
+            if self.is_filament_in_finda:
                 if not self.unload_filament_from_extruder():
                     return False
-                if not self.validate_filament_not_stuck_in_pinda():
+                if not self.validate_filament_not_stuck_in_finda():
                     return False
                 self.respond_info("Filament ejected !")
             else:
@@ -1380,7 +1380,7 @@ class MMU3:
             f"{STEPPER_NAME_MAP[PULLEY_STEPPER_NAME]} : "
             f"{self.pulley_stepper_endstop.query_endstop(print_time)}"
         )
-        # gcmd.respond_info(f"is_filament_in_pinda: {self.is_filament_in_pinda}")
+        # gcmd.respond_info(f"is_filament_in_finda: {self.is_filament_in_finda}")
         self.respond_info(
             f"{STEPPER_NAME_MAP[SELECTOR_STEPPER_NAME]} : "
             f"{self.selector_stepper_endstop.query_endstop(print_time)}"
@@ -1417,7 +1417,7 @@ class MMU3:
 
         1) home the idler
         2) home the selector (if needed)
-        3) try to load filament 0 to PINDA and then unload it. Used to verify
+        3) try to load filament 0 to FINDA and then unload it. Used to verify
            the MMU3 gear
 
         if all is ok, the MMU3 is ready to be used
@@ -1428,13 +1428,13 @@ class MMU3:
         self.home_mmu_only()
 
     @gcmd_grabber
-    def cmd_load_filament_to_pinda_in_loop(self, gcmd: GCodeCommand) -> None:
-        """Load the filament to pinda in a infinite loop.
+    def cmd_load_filament_to_finda_in_loop(self, gcmd: GCodeCommand) -> None:
+        """Load the filament to finda in a infinite loop.
 
         Args:
             gcmd (GCodeCommand): The G-code command.
         """
-        self.load_filament_to_pinda_in_loop()
+        self.load_filament_to_finda_in_loop()
 
     @gcmd_grabber
     def cmd_pause(self, gcmd: GCodeCommand) -> None:
@@ -1611,32 +1611,32 @@ class MMU3:
         self.unload_filament_in_extruder_with_ramming()
 
     @gcmd_grabber
-    def cmd_load_filament_to_pinda(self, gcmd: GCodeCommand) -> None:
-        """Load filament until the PINDA detect it.
+    def cmd_load_filament_to_finda(self, gcmd: GCodeCommand) -> None:
+        """Load filament until the FINDA detect it.
 
         Then push it 10mm more to be sure is well detected.
-        PAUSE_MMU is called if the PINDA does not detect the filament
+        PAUSE_MMU is called if the FINDA does not detect the filament
 
         Args:
             gcmd (GCodeCommand): The G-code command.
         """
-        self.load_filament_to_pinda()
+        self.load_filament_to_finda()
 
     @gcmd_grabber
-    def cmd_load_filament_from_pinda_to_extruder(self, gcmd: GCodeCommand) -> None:
-        """Load from the PINDA to the extruder gear.
+    def cmd_load_filament_from_finda_to_extruder(self, gcmd: GCodeCommand) -> None:
+        """Load from the FINDA to the extruder gear.
 
         Args:
             gcmd (GCodeCommand): The G-code command.
         """
-        self.load_filament_from_pinda_to_extruder()
+        self.load_filament_from_finda_to_extruder()
 
     @gcmd_grabber
     def cmd_load_filament_to_extruder(self, gcmd: GCodeCommand) -> None:
-        """Load from MMU3 to extruder gear by calling LOAD_FILAMENT_TO_PINDA.
+        """Load from MMU3 to extruder gear by calling LOAD_FILAMENT_TO_FINDA.
 
-        Then LOAD_FILAMENT_FROM_PINDA_TO_EXTRUDER.
-        PAUSE_MMU is called if the PINDA does not detect the filament.
+        Then LOAD_FILAMENT_FROM_FINDA_TO_EXTRUDER.
+        PAUSE_MMU is called if the FINDA does not detect the filament.
 
         Args:
             gcmd (GCodeCommand): The G-code command.
@@ -1644,32 +1644,32 @@ class MMU3:
         self.load_filament_to_extruder()
 
     @gcmd_grabber
-    def cmd_unload_filament_from_pinda(self, gcmd: GCodeCommand) -> None:
-        """Unload filament until the PINDA detect it.
+    def cmd_unload_filament_from_finda(self, gcmd: GCodeCommand) -> None:
+        """Unload filament until the FINDA detect it.
 
         Then push it -10mm more to be sure is well not detected.
-        PAUSE_MMU is called if the PINDA does detect the filament.
+        PAUSE_MMU is called if the FINDA does detect the filament.
 
         Args:
             gcmd (GCodeCommand): The G-code command.
         """
-        self.unload_filament_from_pinda()
+        self.unload_filament_from_finda()
 
     @gcmd_grabber
-    def cmd_unload_filament_from_extruder_to_pinda(self, gcmd: GCodeCommand) -> None:
-        """Unload from extruder gear to the PINDA.
+    def cmd_unload_filament_from_extruder_to_finda(self, gcmd: GCodeCommand) -> None:
+        """Unload from extruder gear to the FINDA.
 
         Args:
             gcmd (GCodeCommand): The G-code command.
         """
-        self.unload_filament_from_extruder_to_pinda()
+        self.unload_filament_from_extruder_to_finda()
 
     @gcmd_grabber
     def cmd_unload_filament_from_extruder(self, gcmd: GCodeCommand) -> None:
         """Unload from the extruder gear to the MMU3.
 
-        Do it by calling UNLOAD_FILAMENT_FROM_EXTRUDER_TO_PINDA and
-        then UNLOAD_FILAMENT_FROM_PINDA
+        Do it by calling UNLOAD_FILAMENT_FROM_EXTRUDER_TO_FINDA and
+        then UNLOAD_FILAMENT_FROM_FINDA
 
         Args:
             gcmd (GCodeCommand): The G-code command.
@@ -1685,7 +1685,7 @@ class MMU3:
         """
         self.unload_tool()
         if not self.enable_5in1:
-            if not self.is_filament_in_pinda:
+            if not self.is_filament_in_finda:
                 self.unselect_tool()
                 self.respond_info("M702 ok ...")
             else:
