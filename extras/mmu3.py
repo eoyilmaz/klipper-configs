@@ -147,7 +147,7 @@ class MMU3:
         self.extruder_eject_temp = config.getint("extruder_eject_temp", 200)
         # other options
         self.enable_5in1: bool = config.getboolean("enable_5in1", False)
-        self.pinda_load_retry = config.getint("pinda_load_retry", 100)
+        self.pinda_load_retry = config.getint("pinda_load_retry", 20)
         self.load_retry = config.getint("load_retry", 5)
         self.unload_retry = config.getint("unload_retry", 5)
         self.filament_sensor_name = config.get(
@@ -571,13 +571,16 @@ class MMU3:
 
         return True
 
-    def load_filament_to_pinda_in_loop(self) -> None:
+    def load_filament_to_pinda_in_loop(self) -> bool:
         """Load the filament to pinda in a infinite loop.
 
         Args:
             gcmd (GCodeCommand): The G-code command.
+
+        Returns:
+            bool: True, if filament loaded to pinda, False otherwise.
         """
-        while True:
+        for i in range(self.pinda_load_retry):
             self.pulley_stepper.do_set_position(0)
             self.pulley_stepper.do_homing_move(
                 self.pinda_load_length,
@@ -591,8 +594,13 @@ class MMU3:
             # check endstop status and exit from the loop
             if self.is_filament_in_pinda:
                 self.respond_info("Pinda endstop triggered. Exiting filament load.")
-                break
-            self.respond_info("Pinda endstop not triggered. Retrying...")
+                return True
+            self.respond_info(f"Pinda endstop not triggered. Retrying... {i}")
+        self.respond_info(
+            f"Couldn't load filament to pinda after {self.pinda_load_retry}!"
+        )
+        self.pause()
+        return False
 
     def pause(self) -> None:
         """Pause the MMU.
@@ -1013,7 +1021,8 @@ class MMU3:
             return False
 
         self.respond_info("Loading filament to PINDA ...")
-        self.load_filament_to_pinda_in_loop()
+        if not self.load_filament_to_pinda_in_loop():
+            return False
 
         self.pulley_stepper.do_set_position(0)
         # self.pulley_stepper.do_move(
