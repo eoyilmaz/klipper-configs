@@ -5,18 +5,19 @@ from __future__ import annotations
 from functools import partial, wraps
 from typing import TYPE_CHECKING, Callable
 
+from extras.manual_stepper import ManualStepper
+
 if TYPE_CHECKING:
     from configfile import ConfigWrapper
+    from extras.display_status import DisplayStatus
+    from extras.filament_switch_sensor import SwitchSensor
+    from extras.heaters import Heater, PrinterHeaters
+    from extras.query_endstops import QueryEndstops
     from gcode import GCodeCommand, GCodeDispatch
     from kinematics.extruder import PrinterExtruder
     from klippy import Printer
     from mcu import MCU_endstop
     from toolhead import ToolHead
-
-    from extras.filament_switch_sensor import SwitchSensor
-    from extras.heaters import Heater, PrinterHeaters
-    from extras.manual_stepper import ManualStepper
-    from extras.query_endstops import QueryEndstops
 
 
 IDLER_STEPPER_NAME = "manual_stepper idler_stepper"
@@ -74,6 +75,7 @@ class MMU3:
         self._pulley_stepper_endstop = None
         self._selector_stepper = None
         self._selector_stepper_endstop = None
+        self._display_status = None
 
         # state variables
         self.debug = False
@@ -108,14 +110,21 @@ class MMU3:
         self.bowden_unload_speed = config.getint("bowden_unload_speed", 120)
         self.bowden_unload_accel = config.getint("bowden_unload_accel", 120)
         # finda load/unload
-        self.finda_endstop = None
+        self.finda_load_retry = config.getint("finda_load_retry", 20)
         self.finda_load_length = config.getfloat("finda_load_length", 120)
         self.finda_unload_length = config.getfloat("finda_unload_length", 35)
         self.finda_load_speed = config.getint("finda_load_speed", 20)
         self.finda_unload_speed = config.getint("finda_unload_speed", 20)
         self.finda_load_accel = config.getint("finda_load_accel", 50)
         self.finda_unload_accel = config.getint("finda_unload_accel", 50)
+        # cut length
+        self.cut_filament_length = config.getfloat("cut_filament_length", 20)
+        self.cutting_edge_retract = config.getfloat("cutting_edge_retract", 5)
+        self.cut_stepper_current = config.getfloat("cut_stepper_current", 1.0)
         # selector
+        self.selector_speed = config.getfloat("selector_speed", 35)
+        self.selector_homing_speed = config.getfloat("selector_homing_speed", 20)
+        self.selector_accel = config.getfloat("selector_accel", 200)
         self.selector_positions = [
             float(f.strip())
             for f in config.getlist(
@@ -147,7 +156,6 @@ class MMU3:
         self.extruder_eject_temp = config.getint("extruder_eject_temp", 200)
         # other options
         self.enable_5in1: bool = config.getboolean("enable_5in1", False)
-        self.finda_load_retry = config.getint("finda_load_retry", 20)
         self.load_retry = config.getint("load_retry", 5)
         self.unload_retry = config.getint("unload_retry", 5)
         self.filament_sensor_name = config.get(
@@ -182,6 +190,15 @@ class MMU3:
         else:
             self._gcmd.respond_info(f"MMU3: {msg}")
 
+    def display_status_msg(self, msg: str) -> None:
+        """Display the given status message in the LCD display."""
+        # also send the message to the console
+        self.respond_info(msg)
+        # if self.display_status is not None:
+        #     self.display_status.message = msg
+        #     self.display_status.progress
+        self.gcode.run_script_from_command(f"M117 {msg}")
+
     def register_commands(self) -> None:
         """Register new GCode commands."""
         self.gcode.register_command(
@@ -195,6 +212,7 @@ class MMU3:
 
         for i in range(self.number_of_tools):
             self.gcode.register_command(f"T{i}", partial(self.cmd_tx, tool_id=i))
+            self.gcode.register_command(f"K{i}", partial(self.cmd_kx, tool_id=i))
 
         self.gcode.register_command("UNLOCK_MMU", self.cmd_unlock)
         self.gcode.register_command("LT", self.cmd_load_tool)
@@ -214,7 +232,6 @@ class MMU3:
         self.gcode.register_command(
             "UNLOAD_FILAMENT_IN_EXTRUDER", self.cmd_unload_filament_in_extruder
         )
-        self.gcode.register_command("RAMMING_SLICER", self.cmd_ramming_slicer)
         self.gcode.register_command("EJECT_RAMMING", self.cmd_eject_ramming)
         self.gcode.register_command(
             "UNLOAD_FILAMENT_IN_EXTRUDER_WITH_RAMMING",
@@ -243,6 +260,16 @@ class MMU3:
         self.gcode.register_command("M702", self.cmd_m702)
         self.gcode.register_command("EJECT_FROM_EXTRUDER", self.cmd_eject_from_extruder)
         self.gcode.register_command("EJECT_BEFORE_HOME", self.cmd_eject_before_home)
+
+    @property
+    def display_status(self) -> DisplayStatus:
+        """Return the DisplayStatus instance.
+
+        Returns:
+            DisplayStatus: The LCD display to set messages.
+        """
+        if self._display_status is None:
+            self._display_status = self.printer.lookup_object("display_status")
 
     @property
     def toolhead(self) -> ToolHead:
@@ -388,18 +415,46 @@ class MMU3:
         print_time = self.toolhead.get_last_move_time()
         return bool(self.pulley_stepper_endstop.query_endstop(print_time))
 
+    def disable_steppers(
+        self, steppers: None | ManualStepper | list[ManualStepper] = None
+    ) -> bool:
+        """Disable all stepper motors.
+
+        Args:
+            steppers (None | list[ManualStepper]): If None all the steppers are
+                disabled, if it is a list, only the given steppers are
+                disabled.
+
+        Returns:
+            bool: True, if all are successfully disabled, False otherwise.
+        """
+        if steppers is None:
+            steppers = [self.pulley_stepper, self.selector_stepper, self.idler_stepper]
+        elif isinstance(steppers, ManualStepper):
+            steppers = [steppers]
+
+        if not isinstance(steppers, list):
+            return False
+
+        for stepper in steppers:
+            stepper.dwell(self.pause_before_disabling_steppers)
+            stepper.do_enable(False)
+            stepper.dwell(self.pause_after_disabling_steppers)
+
+        return True
+
     def validate_filament_in_extruder(self) -> bool:
         """Call PAUSE_MMU if the filament is not detected by the filament sensor.
 
         Returns:
             bool: True if filament in extruder, False otherwise.
         """
-        self.respond_info("Checking if filament in extruder")
+        self.display_status_msg("Checking if filament in extruder")
         if not self.is_filament_present_in_extruder:
-            self.respond_info("Filament not in extruder")
+            self.display_status_msg("Filament not in extruder")
             self.pause()
             return False
-        self.respond_info("Filament in extruder")
+        self.display_status_msg("Filament in extruder")
         return True
 
     def validate_filament_not_stuck_in_extruder(self) -> bool:
@@ -408,12 +463,12 @@ class MMU3:
         Returns:
             bool: True if the filament is not present in finda, False otherwise.
         """
-        self.respond_info("Checking if filament stuck in extruder")
+        self.display_status_msg("Checking if filament stuck in extruder")
         if self.is_filament_present_in_extruder:
-            self.respond_info("Filament stuck in extruder")
+            self.display_status_msg("Filament stuck in extruder")
             self.pause()
             return False
-        self.respond_info("Filament not in extruder")
+        self.display_status_msg("Filament not in extruder")
         return True
 
     def validate_filament_is_in_finda(self) -> bool:
@@ -422,12 +477,12 @@ class MMU3:
         Returns:
             bool: True if filament is in finda, False otherwise.
         """
-        self.respond_info("Checking if filament in FINDA")
+        self.display_status_msg("Checking if filament in FINDA")
         if not self.is_filament_in_finda:
-            self.respond_info("Filament not in FINDA")
+            self.display_status_msg("Filament not in FINDA")
             self.pause()
             return False
-        self.respond_info("Filament in FINDA")
+        self.display_status_msg("Filament in FINDA")
         return True
 
     def validate_filament_not_stuck_in_finda(self) -> bool:
@@ -436,12 +491,12 @@ class MMU3:
         Returns:
             bool: True if filament is not stuck in FINDA, False otherwise.
         """
-        self.respond_info("Checking if filament stuck in FINDA")
+        self.display_status_msg("Checking if filament stuck in FINDA")
         if self.is_filament_in_finda:
-            self.respond_info("Filament stuck in FINDA")
+            self.display_status_msg("Filament stuck in FINDA")
             self.pause()
             return False
-        self.respond_info("Filament not in FINDA")
+        self.display_status_msg("Filament not in FINDA")
         return True
 
     def validate_hotend_is_hot_enough(self) -> bool:
@@ -452,10 +507,10 @@ class MMU3:
         Returns:
             bool: True if hotend is hot enough, False otherwise.
         """
-        self.respond_info("Checking if hotend is too cold")
+        self.display_status_msg("Checking if hotend is too cold")
         print_time = self.toolhead.get_last_move_time()
         if self.extruder_heater.get_temp(print_time)[0] < self.min_temp_extruder:
-            self.respond_info("Hotend is too cold")
+            self.display_status_msg("Hotend is too cold")
             self.pause()
             return False
         return True
@@ -467,7 +522,7 @@ class MMU3:
             gcmd (GcodeCommand): The G-code command.
         """
         # Home the idler
-        self.respond_info("Homing idler")
+        self.display_status_msg("Homing idler")
         self.idler_stepper.do_set_position(0)
         self.idler_stepper.do_move(
             7,
@@ -485,9 +540,7 @@ class MMU3:
             self.idler_stepper.velocity,
             self.idler_stepper.accel,
         )
-        self.idler_stepper.dwell(self.pause_before_disabling_steppers)
-        self.idler_stepper.do_enable(False)
-        self.idler_stepper.dwell(self.pause_after_disabling_steppers)
+        self.disable_steppers(self.idler_stepper)
 
     def home_mmu(self) -> bool:
         """Home the MMU.
@@ -504,7 +557,7 @@ class MMU3:
 
         self.filament_sensor.runout_helper.sensor_enabled = False
         self.is_homed = True
-        self.respond_info("Homing MMU ...")
+        self.display_status_msg("Homing MMU ...")
         if not self.eject_before_home():
             return False
 
@@ -534,24 +587,22 @@ class MMU3:
             bool: True, if mmu homed, False otherwise.
         """
         if self.is_paused:
-            self.respond_info("Homing MMU failed, MMU is paused, unlock it ...")
+            self.display_status_msg("Homing MMU failed, MMU is paused, unlock it ...")
             return False
 
         self.home_idler()
         if not self.enable_5in1:
-            self.respond_info("Homing selector")
+            self.display_status_msg("Homing selector")
             self.selector_stepper.do_set_position(0)
             self.selector_stepper.do_homing_move(
                 -76,
-                self.selector_stepper.velocity,
-                self.selector_stepper.accel,
+                self.selector_homing_speed,
+                self.selector_accel,
                 True,
                 True,
             )
             self.selector_stepper.do_set_position(0)
-            self.selector_stepper.dwell(self.pause_before_disabling_steppers)
-            self.selector_stepper.do_enable(False)
-            self.selector_stepper.dwell(self.pause_after_disabling_steppers)
+            self.disable_steppers(self.selector_stepper)
 
         # self.idler_stepper.do_move(
         #     0,
@@ -560,14 +611,14 @@ class MMU3:
         # )
         self.current_tool = None
         self.current_filament = None
-        self.idler_stepper.dwell(self.pause_before_disabling_steppers)
-        self.idler_stepper.do_enable(False)
-        self.idler_stepper.dwell(self.pause_after_disabling_steppers)
-        self.respond_info("Move selector to filament 0")
+        self.disable_steppers(self.idler_stepper)
+        self.display_status_msg("Move selector to filament 0")
         self.select_tool(0)
         self.unselect_tool()
         self.is_homed = True
-        self.respond_info("Homing MMU ended ...")
+        self.display_status_msg("Homing MMU ended ...")
+
+        self.disable_steppers()
 
         return True
 
@@ -593,10 +644,12 @@ class MMU3:
 
             # check endstop status and exit from the loop
             if self.is_filament_in_finda:
-                self.respond_info("Finda endstop triggered. Exiting filament load.")
+                self.display_status_msg(
+                    "Finda endstop triggered. Exiting filament load."
+                )
                 return True
-            self.respond_info(f"Finda endstop not triggered. Retrying... {i}")
-        self.respond_info(
+            self.display_status_msg(f"Finda endstop not triggered. Retrying... {i}")
+        self.display_status_msg(
             f"Couldn't load filament to finda after {self.finda_load_retry}!"
         )
         self.pause()
@@ -640,7 +693,7 @@ class MMU3:
         Args:
             gcmd GCodeCommand: The G-code command.
         """
-        self.respond_info("Resume print")
+        self.display_status_msg("Resume print")
         self.is_paused = False
         self.home_idler()
 
@@ -657,13 +710,13 @@ class MMU3:
             return False
 
         if not self.is_homed:
-            self.respond_info("Could not select tool, MMU is not homed")
+            self.display_status_msg("Could not select tool, MMU is not homed")
             return False
 
         if tool_id is None or tool_id < 0:
             return False
 
-        self.respond_info(f"Select Tool {tool_id} ...")
+        self.display_status_msg(f"Select Tool {tool_id} ...")
         self.idler_stepper.do_move(
             self.idler_positions[tool_id],
             self.idler_stepper.velocity,
@@ -673,12 +726,10 @@ class MMU3:
         if not self.enable_5in1:
             self.selector_stepper.do_move(
                 self.selector_positions[tool_id],
-                self.selector_stepper.velocity,
-                self.selector_stepper.accel,
+                self.selector_speed,
+                self.selector_accel,
             )
-            self.selector_stepper.dwell(self.pause_before_disabling_steppers)
-            self.selector_stepper.do_enable(False)
-            self.selector_stepper.dwell(self.pause_after_disabling_steppers)
+            self.disable_steppers(self.selector_stepper)
         self.current_tool = tool_id
         # self.current_filament = None  # tool_id
         self.respond_debug(f"self.current_tool    : {self.current_tool}")
@@ -696,11 +747,11 @@ class MMU3:
         if self.is_paused:
             return False
         if not self.is_homed:
-            self.respond_info("Could not unselect tool, MMU is not homed")
+            self.display_status_msg("Could not unselect tool, MMU is not homed")
             return False
 
         if self.current_tool is not None:
-            self.respond_info(f"Unselecting Tool T{self.current_tool}")
+            self.display_status_msg(f"Unselecting Tool T{self.current_tool}")
         else:
             self.respond_info("Unselecting tool while Current Tool is None!")
 
@@ -710,14 +761,12 @@ class MMU3:
             self.idler_stepper.accel,
         )
         self.current_tool = None
-        self.idler_stepper.dwell(self.pause_before_disabling_steppers)
-        self.idler_stepper.do_enable(False)
-        self.idler_stepper.dwell(self.pause_after_disabling_steppers)
+        self.disable_steppers(self.idler_stepper)
 
         self.respond_debug(f"self.current_tool    : {self.current_tool}")
         self.respond_debug(f"self.current_filament: {self.current_filament}")
 
-        self.respond_info("Unselect Tool is complete!")
+        self.display_status_msg("Unselect Tool is complete!")
         return True
 
     def retry_load_filament_in_extruder(self) -> bool:
@@ -733,17 +782,17 @@ class MMU3:
         if self.is_filament_present_in_extruder:
             return True
 
-        self.respond_info("Retry loading ...")
+        self.display_status_msg("Retry loading ...")
         print_time = self.toolhead.get_last_move_time()
         if self.is_paused:
-            self.respond_info("Printer is paused ...")
+            self.display_status_msg("Printer is paused ...")
             return False
 
         if self.extruder_heater.get_temp(print_time)[0] < self.min_temp_extruder:
-            self.respond_info("Hotend is not hot enough ...")
+            self.display_status_msg("Hotend is not hot enough ...")
             return False
 
-        self.respond_info("Loading Filament...")
+        self.display_status_msg("Loading Filament...")
         self.gcode.run_script_from_command("G91")
         self.select_tool(self.current_filament)
 
@@ -755,9 +804,7 @@ class MMU3:
         )
 
         self.pulley_stepper.do_set_position(0)
-        self.pulley_stepper.dwell(self.pause_before_disabling_steppers)
-        self.pulley_stepper.do_enable(False)
-        self.pulley_stepper.dwell(self.pause_after_disabling_steppers)
+        self.disable_steppers(self.pulley_stepper)
 
         self.gcode.run_script_from_command("G1 E5 F600")
         self.unselect_tool()
@@ -791,7 +838,7 @@ class MMU3:
         self.respond_debug(f"self.current_tool    : {self.current_tool}")
         self.respond_debug(f"self.current_filament: {self.current_filament}")
 
-        self.respond_info("Loading Filament...")
+        self.display_status_msg("Loading Filament...")
         self.gcode.run_script_from_command("G91")
         self.pulley_stepper.do_set_position(0)
         self.pulley_stepper.do_move(
@@ -800,9 +847,7 @@ class MMU3:
             self.pulley_stepper.accel,
         )
         self.pulley_stepper.do_set_position(0)
-        self.pulley_stepper.dwell(self.pause_before_disabling_steppers)
-        self.pulley_stepper.do_enable(False)
-        self.pulley_stepper.dwell(self.pause_after_disabling_steppers)
+        self.disable_steppers(self.pulley_stepper)
         self.gcode.run_script_from_command("G1 E10 F600")
         self.unselect_tool()
         self.gcode.run_script_from_command("""
@@ -823,7 +868,7 @@ class MMU3:
             self.respond_debug(f"self.current_filament: {self.current_filament}")
             return False
 
-        self.respond_info("Load Complete")
+        self.display_status_msg("Load Complete")
         self.respond_debug(f"self.current_tool    : {self.current_tool}")
         self.respond_debug(f"self.current_filament: {self.current_filament}")
         return True
@@ -833,17 +878,17 @@ class MMU3:
         if not self.is_filament_present_in_extruder:
             return True
 
-        self.respond_info("Retry unloading ....")
+        self.display_status_msg("Retry unloading ....")
         if self.is_paused:
-            self.respond_info("MMU is paused")
+            self.display_status_msg("MMU is paused")
             return False
 
         print_time = self.toolhead.get_last_move_time()
         if self.extruder_heater.get_temp(print_time)[0] < self.min_temp_extruder:
-            self.respond_info("Hotend is too cold")
+            self.display_status_msg("Hotend is too cold")
             return False
 
-        self.respond_info("Unloading Filament...")
+        self.display_status_msg("Unloading Filament...")
         self.gcode.run_script_from_command("""
             G91
             G92 E0
@@ -871,7 +916,7 @@ class MMU3:
             return False
 
         if not self.is_filament_present_in_extruder:
-            self.respond_info("No filament in extruder")
+            self.display_status_msg("No filament in extruder")
             return True
 
         if self.current_tool is not None:
@@ -880,9 +925,10 @@ class MMU3:
             # return False
             self.respond_info(f"Tool T{self.current_tool} selected!")
             self.respond_info("Auto unselecting it!")
+            self.respond_info(f"Auto unselecting T{self.current_tool}")
             self.unselect_tool()
 
-        self.respond_info("Unloading Filament...")
+        self.display_status_msg("Unloading Filament...")
         self.gcode.run_script_from_command("""
             G91
             G92 E0
@@ -899,62 +945,12 @@ class MMU3:
         if not self.validate_filament_not_stuck_in_extruder():
             return False
 
-        self.respond_info("Filament removed")
+        self.display_status_msg("Filament removed")
         return True
 
     def ramming_slicer(self) -> None:
-        """Ramming process for standard PLA, code extracted from OrcaSlicer gcode."""
-        self.gcode.run_script_from_command("""
-        G91
-        G92 E0
-        ;TYPE:Prime tower
-        ;WIDTH:0.5
-        ;--------------------
-        ; CP TOOLCHANGE START
-        M220 S100
-        ; CP TOOLCHANGE UNLOAD
-        ;WIDTH:0.65
-        SET_PRESSURE_ADVANCE ADVANCE=0
-        G1 E0.2213 F1052
-        G1 E0.2481 F1180
-        G1 E0.3051 F1451
-        G1 E0.3722 F1769
-        G1 E0.4191 F1993
-        G1 E0.4728 F2248
-        G1 E0.5800 F2758
-        G1 E0.3344 F3379
-        G1 E0.3764 F3379
-        G1 E0.7846 F3730
-        G1 E0.8080 F3842
-        G1 E0.8751 F4161
-        G1 E0.1090 F4750
-        G1 E0.8902 F4750
-        G1 E1.0863 F5165
-        G1 E0.9765 F5245
-        G1 E0.1266 F5245
-        ; Ramming start
-        ; Retract(unload)
-        G1 E-15.0000 F12000
-        G1 E-8.0500 F5400
-        G1 E-2.3000 F2700
-        G1 E-1.1500 F1620
-        ; Cooling
-        G1 E5.0000 F2016
-        G1 E-5.0000 F1920
-        G1 E5.0000 F1824
-        G1 E-5.0000 F1728
-        G1 E5.0000 F1632
-        G1 E-5.0000 F1536
-        G1 E5.0000 F1440
-        G1 E-5.0000 F1344
-        ; Cooling park
-        G1 E1.5000 F2000
-        ; Ramming end
-        G1 E-1 F5100
-        G1 E-50.0000 F2000
-        G90
-        G92 E0
-        """)
+        """Call the ramming process."""
+        self.gcode.run_script_from_command("RAMMING_SLICER")
 
     def eject_ramming(self) -> bool:
         """Eject the filament with ramming from the extruder nozzle to the MMU3.
@@ -968,7 +964,7 @@ class MMU3:
         if self.current_filament is None:
             return False
 
-        self.respond_info(f"UT {self.current_filament} ...")
+        self.display_status_msg(f"UT {self.current_filament} ...")
         if not self.unload_filament_in_extruder_with_ramming():
             return False
         self.select_tool(self.current_filament)
@@ -993,13 +989,14 @@ class MMU3:
             # return False
             self.respond_info(f"Tool T{self.current_tool} selected!")
             self.respond_info("Auto unselecting it!")
+            self.display_status_msg(f"Auto unselecting T{self.current_tool}")
             self.unselect_tool()
 
-        self.respond_info("Ramming and Unloading Filament...")
+        self.display_status_msg("Ramming and Unloading Filament...")
         self.ramming_slicer()
         if not self.unload_filament_in_extruder():
             return False
-        self.respond_info("Filament rammed and removed")
+        self.display_status_msg("Filament rammed and removed")
         return True
 
     def load_filament_to_finda(self) -> bool:
@@ -1017,10 +1014,10 @@ class MMU3:
         self.respond_debug(f"self.current_tool    : {self.current_tool}")
         self.respond_debug(f"self.current_filament: {self.current_filament}")
         if self.current_tool is None:
-            self.respond_info("Cannot load to FINDA, tool not selected !!")
+            self.display_status_msg("Cannot load to FINDA, tool not selected !!")
             return False
 
-        self.respond_info("Loading filament to FINDA ...")
+        self.display_status_msg("Loading filament to FINDA ...")
         if not self.load_filament_to_finda_in_loop():
             return False
 
@@ -1030,9 +1027,7 @@ class MMU3:
         #     self.pulley_stepper.velocity,
         #     self.pulley_stepper.accel,
         # )
-        self.pulley_stepper.dwell(self.pause_before_disabling_steppers)
-        self.pulley_stepper.do_enable(False)
-        self.pulley_stepper.dwell(self.pause_after_disabling_steppers)
+        self.disable_steppers(self.pulley_stepper)
 
         self.respond_debug(f"self.current_tool    : {self.current_tool}")
         self.respond_debug(f"self.current_filament: {self.current_filament}")
@@ -1041,7 +1036,7 @@ class MMU3:
             return False
 
         self.current_filament = self.current_tool
-        self.respond_info("Loading done to FINDA")
+        self.display_status_msg("Loading done to FINDA")
         self.respond_debug(f"self.current_tool    : {self.current_tool}")
         self.respond_debug(f"self.current_filament: {self.current_filament}")
         return True
@@ -1057,10 +1052,10 @@ class MMU3:
             return False
 
         if self.current_tool is None:
-            self.respond_info("Cannot load to extruder, tool not selected !!")
+            self.display_status_msg("Cannot load to extruder, tool not selected !!")
             return False
 
-        self.respond_info("Loading filament from FINDA to extruder ...")
+        self.display_status_msg("Loading filament from FINDA to extruder ...")
         self.pulley_stepper.do_set_position(0)
         self.pulley_stepper.do_move(
             self.bowden_load_length1,
@@ -1073,10 +1068,8 @@ class MMU3:
             self.bowden_load_speed2,
             self.bowden_load_accel2,
         )
-        self.pulley_stepper.dwell(self.pause_before_disabling_steppers)
-        self.pulley_stepper.do_enable(False)
-        self.pulley_stepper.dwell(self.pause_after_disabling_steppers)
-        self.respond_info("Loading done from FINDA to extruder")
+        self.disable_steppers(self.pulley_stepper)
+        self.display_status_msg("Loading done from FINDA to extruder")
 
         return True
 
@@ -1093,15 +1086,15 @@ class MMU3:
             return False
 
         if self.current_tool is None:
-            self.respond_info("Cannot load to extruder, tool not selected !!")
+            self.display_status_msg("Cannot load to extruder, tool not selected !!")
             return False
 
-        self.respond_info("Loading filament from MMU to extruder ...")
+        self.display_status_msg("Loading filament from MMU to extruder ...")
         if self.enable_5in1 is False and not self.load_filament_to_finda():
             return False
 
         if self.load_filament_from_finda_to_extruder():
-            self.respond_info("Loading done from MMU to extruder")
+            self.display_status_msg("Loading done from MMU to extruder")
             return True
         # there should be an error about loading from finda to extruder
         return False
@@ -1119,10 +1112,10 @@ class MMU3:
             return False
 
         if self.current_tool is None:
-            self.respond_info("Cannot unload from FINDA, tool not selected !!")
+            self.display_status_msg("Cannot unload from FINDA, tool not selected !!")
             return False
 
-        self.respond_info("Unloading filament from FINDA ...")
+        self.display_status_msg("Unloading filament from FINDA ...")
         self.pulley_stepper.do_set_position(0)
         self.pulley_stepper.do_move(
             -self.finda_unload_length,
@@ -1130,13 +1123,11 @@ class MMU3:
             self.finda_unload_accel,
         )
         self.pulley_stepper.do_set_position(0)
-        self.pulley_stepper.dwell(self.pause_before_disabling_steppers)
-        self.pulley_stepper.do_enable(False)
-        self.pulley_stepper.dwell(self.pause_after_disabling_steppers)
+        self.disable_steppers(self.pulley_stepper)
         if not self.validate_filament_not_stuck_in_finda():
             return False
         self.current_filament = None
-        self.respond_info("Unloading done from FINDA")
+        self.display_status_msg("Unloading done from FINDA")
         return True
 
     def unload_filament_from_extruder_to_finda(self) -> bool:
@@ -1149,12 +1140,12 @@ class MMU3:
             return False
 
         if self.current_tool is None:
-            self.respond_info(
+            self.display_status_msg(
                 "Cannot unload from extruder to FINDA, tool not selected !!"
             )
             return False
 
-        self.respond_info("Unloading filament from extruder to FINDA ...")
+        self.display_status_msg("Unloading filament from extruder to FINDA ...")
         self.pulley_stepper.do_set_position(0)
         if not self.enable_5in1:
             self.pulley_stepper.do_homing_move(
@@ -1179,10 +1170,8 @@ class MMU3:
                 self.bowden_unload_speed,
                 self.bowden_unload_accel,
             )
-        self.pulley_stepper.dwell(self.pause_before_disabling_steppers)
-        self.pulley_stepper.do_enable(False)
-        self.pulley_stepper.dwell(self.pause_after_disabling_steppers)
-        self.respond_info("Unloading done from FINDA to extruder")
+        self.disable_steppers(self.pulley_stepper)
+        self.display_status_msg("Unloading done from FINDA to extruder")
         return True
 
     def unload_filament_from_extruder(self) -> bool:
@@ -1198,23 +1187,125 @@ class MMU3:
             return False
 
         if self.current_tool is None:
-            self.respond_info(
+            self.display_status_msg(
                 "Cannot unload from extruder to MMU, tool not selected !!"
             )
             return False
 
-        self.respond_info("Unloading filament from extruder to MMU ...")
+        self.display_status_msg("Unloading filament from extruder to MMU ...")
         if not self.unload_filament_from_extruder_to_finda():
             return False
 
         if self.enable_5in1:
-            self.respond_info("Unloading done from extruder to MMU")
+            self.display_status_msg("Unloading done from extruder to MMU")
             return True
 
         if not self.unload_filament_from_finda():
             return False
 
-        self.respond_info("Unloading done from extruder to MMU")
+        self.display_status_msg("Unloading done from extruder to MMU")
+        return True
+
+    def cut_filament(self, tool_id: int) -> bool:
+        """Cut the filament in the MMU3.
+
+        Perform the cut from right to left.
+
+        Args:
+            tool_id (int): The tool id.
+
+        Returns:
+            bool: True, if filament is cut, False otherwise.
+        """
+        if self.is_paused:
+            return False
+
+        if self.enable_5in1:
+            self.display_status_msg("Cannot perform cut in 5in1 mode!")
+            return False
+
+        self.display_status_msg(f"Cutting filament T{tool_id} ...")
+
+        # First unload filament
+        if not self.unload_tool():
+            self.display_status_msg("Apparently unload tool failed!")
+            return False
+
+        # Select tool
+        if not self.select_tool(tool_id):
+            return False
+
+        # Feed to finda
+        if not self.load_filament_to_finda():
+            return False
+
+        # Unload filament from finda
+        if not self.unload_filament_from_finda():
+            return False
+
+        # Prepare blade
+        # - move the idler to the current tool position,
+        #   to keep the filament tight in place.
+        # - move the selector to the 0 position
+        self.idler_stepper.do_move(
+            self.idler_positions[tool_id],
+            self.idler_stepper.velocity,
+            self.idler_stepper.accel,
+        )
+        # move the selector to 0 position or close to 0
+        self.selector_stepper.do_move(
+            5,
+            self.selector_speed,
+            self.selector_accel,
+        )
+
+        # Push filament
+        self.pulley_stepper.do_set_position(0)
+        self.pulley_stepper.do_move(
+            self.cut_filament_length + self.cutting_edge_retract,
+            self.pulley_stepper.velocity,
+            self.pulley_stepper.accel,
+        )
+
+        # Unlock the selector
+        # Perform the cut by moving to the current slot
+        # set stepper current
+        # decrease driver_SGTHRS
+        # SET_TMC_FIELD
+        # SET_TMC_CURRENT
+        # TODO: Use the Python API for this, maybe a context manager with `with`?
+        stepper_name = SELECTOR_STEPPER_NAME.split(" ")[-1]
+        self.gcode.run_script_from_command(f"""
+            SET_TMC_FIELD STEPPER={stepper_name} FIELD=SGTHRS VALUE=0
+            SET_TMC_CURRENT STEPPER={stepper_name} CURRENT={self.cut_stepper_current}
+        """)
+
+        # do cut
+        self.selector_stepper.do_move(
+            self.selector_positions[tool_id],
+            self.selector_homing_speed,
+            0,
+        )
+
+        # return the stepper current and threshold to normal
+        # TODO: This is manual for now
+        self.gcode.run_script_from_command(f"""
+            SET_TMC_FIELD STEPPER={stepper_name} FIELD=SGTHRS VALUE=96
+            SET_TMC_CURRENT STEPPER={stepper_name} CURRENT=0.580
+        """)
+
+        # Pull filament back from the cutting edge
+        self.pulley_stepper.do_set_position(0)
+        self.pulley_stepper.do_move(
+            -self.cutting_edge_retract,
+            self.pulley_stepper.velocity,
+            self.pulley_stepper.accel,
+        )
+
+        # Home the mmu
+        self.home_mmu()
+
+        self.display_status_msg(f"Done cutting T{tool_id}!")
         return True
 
     def load_tool(self, tool_id: int) -> bool:
@@ -1231,7 +1322,7 @@ class MMU3:
 
         self.respond_debug(f"self.current_tool    : {self.current_tool}")
         self.respond_debug(f"self.current_filament: {self.current_filament}")
-        self.respond_info(f"LT {tool_id}")
+        self.display_status_msg(f"LT {tool_id}")
         if not self.select_tool(tool_id):
             self.respond_debug(f"self.current_tool    : {self.current_tool}")
             self.respond_debug(f"self.current_filament: {self.current_filament}")
@@ -1256,7 +1347,7 @@ class MMU3:
             return False
 
         if self.current_filament is None:
-            self.respond_info("Current filament is None!")
+            self.display_status_msg("Current filament is None!")
             # so we don't know what tool we are in.
             # we should try homing first
             # and then try unloading_filament one_by_one
@@ -1284,23 +1375,24 @@ class MMU3:
             #     self.current_tool = None
             #     return False
             if self.is_filament_in_finda:
+                self.display_status_msg("Filament in FINDA!")
                 self.respond_info("But there is a filament in FINDA!")
                 if self.current_tool is None:
-                    self.respond_info("Current Tool is also None!")
-                    self.respond_info("Cancelling unload!!!")
+                    self.display_status_msg("Current Tool is also None!")
+                    self.display_status_msg("Cancelling unload!!!")
                     return False
-                self.respond_info(f"Current Tool is {self.current_tool}")
+                self.display_status_msg(f"Current Tool is {self.current_tool}")
                 self.current_filament = self.current_tool
-                self.respond_info(
+                self.display_status_msg(
                     f"Also setting Current filament to {self.current_filament}"
                 )
                 return True
             # filament is not in finda
-            self.respond_info("And no filament in FINDA")
-            self.respond_info("No need to unload!")
+            self.display_status_msg("And no filament in FINDA")
+            self.display_status_msg("No need to unload!")
             return True
 
-        self.respond_info(f"UT {self.current_filament}")
+        self.display_status_msg(f"UT {self.current_filament}")
         if not self.unload_filament_in_extruder():
             return False
         if not self.select_tool(self.current_filament):
@@ -1320,11 +1412,11 @@ class MMU3:
             return False
 
         if not self.is_filament_present_in_extruder:
-            self.respond_info("Filament not in extruder")
+            self.display_status_msg("Filament not in extruder")
             return True
 
-        self.respond_info("Filament in extruder, trying to eject it ...")
-        self.respond_info("Preheat Nozzle")
+        self.display_status_msg("Filament in extruder, trying to eject it ...")
+        self.display_status_msg("Preheat Nozzle")
         print_time = self.toolhead.get_last_move_time()
         min_temp = max(
             self.extruder_heater.get_temp(print_time)[0], self.extruder_eject_temp
@@ -1341,7 +1433,7 @@ class MMU3:
         Returns:
             bool: True, if filament ejected, False otherwise.
         """
-        self.respond_info("Eject Filament if loaded ...")
+        self.display_status_msg("Eject Filament if loaded ...")
         if self.is_filament_present_in_extruder:
             if not self.eject_from_extruder():
                 return False
@@ -1354,11 +1446,11 @@ class MMU3:
                     return False
                 if not self.validate_filament_not_stuck_in_finda():
                     return False
-                self.respond_info("Filament ejected !")
+                self.display_status_msg("Filament ejected !")
             else:
-                self.respond_info("Filament already ejected !")
+                self.display_status_msg("Filament already ejected !")
         else:
-            self.respond_info("Filament already ejected !")
+            self.display_status_msg("Filament already ejected !")
 
         return True
 
@@ -1457,12 +1549,12 @@ class MMU3:
             gcmd (GCodeCommand): The G-code command.
             tool_id (int, optional): The tool id to load. Defaults to 0.
         """
-        self.respond_info(f"Requested tool {tool_id}")
+        self.display_status_msg(f"Requested tool {tool_id}")
         self.respond_debug(f"self.current_tool    : {self.current_tool}")
         self.respond_debug(f"self.current_filament: {self.current_filament}")
         if self.current_filament == tool_id:
             return
-        self.respond_info(f"Change Tool T{tool_id}")
+        self.display_status_msg(f"Change Tool T{tool_id}")
         self.respond_debug(f"self.current_tool    : {self.current_tool}")
         self.respond_debug(f"self.current_filament: {self.current_filament}")
 
@@ -1486,6 +1578,18 @@ class MMU3:
         if runout_pause is not None:
             self.respond_info("Re-Enabling filament runout sensor!")
             self.filament_sensor.runout_helper.runout_pause = runout_pause
+
+        self.display_status_msg(f"Done T{tool_id}")
+
+    @gcmd_grabber
+    def cmd_kx(self, gcmd: GCodeCommand, tool_id: int = 0) -> None:
+        """The generic Kx command.
+
+        Args:
+            gcmd (GCodeCommand): The G-code command.
+            tool_id (int, optional): The tool id to cut. Defaults to 0.
+        """
+        self.cut_filament(tool_id)
 
     @gcmd_grabber
     def cmd_unlock(self, gcmd: GCodeCommand) -> None:
@@ -1584,15 +1688,6 @@ class MMU3:
         self.unload_filament_in_extruder()
 
     @gcmd_grabber
-    def cmd_ramming_slicer(self, gcmd: GCodeCommand) -> None:
-        """Ramming process for standard PLA, code extracted from OrcaSlicer gcode.
-
-        Args:
-            gcmd (GCodeCommand): The G-code command.
-        """
-        self.ramming_slicer()
-
-    @gcmd_grabber
     def cmd_eject_ramming(self, gcmd: GCodeCommand) -> None:
         """Eject the filament with ramming from the extruder nozzle to the MMU3.
 
@@ -1687,13 +1782,13 @@ class MMU3:
         if not self.enable_5in1:
             if not self.is_filament_in_finda:
                 self.unselect_tool()
-                self.respond_info("M702 ok ...")
+                self.display_status_msg("M702 ok ...")
             else:
-                self.respond_info("M702 Error !!!")
+                self.display_status_msg("M702 Error !!!")
         else:
             self.unselect_tool()
             self.current_filament = None
-            self.respond_info("M702 ok ...")
+            self.display_status_msg("M702 ok ...")
 
     @gcmd_grabber
     def cmd_eject_from_extruder(self, gcmd: GCodeCommand) -> None:
