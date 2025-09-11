@@ -1,4 +1,5 @@
 .env
+.ruff_cache
 .venv
 .vscode
 *.code-workspace
