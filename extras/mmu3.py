@@ -155,7 +155,10 @@ class MMU3:
         self.min_temp_extruder = config.getint("min_temp_extruder", 180)
         self.extruder_eject_temp = config.getint("extruder_eject_temp", 200)
         # other options
-        self.enable_5in1: bool = config.getboolean("enable_5in1", False)
+        self.enable_no_selector_mode: bool = config.getboolean(
+            "enable_no_selector_mode",
+            False,
+        )
         self.load_retry = config.getint("load_retry", 5)
         self.unload_retry = config.getint("unload_retry", 5)
         self.filament_sensor_name = config.get(
@@ -591,7 +594,7 @@ class MMU3:
             return False
 
         self.home_idler()
-        if not self.enable_5in1:
+        if not self.enable_no_selector_mode:
             self.display_status_msg("Homing selector")
             self.selector_stepper.do_set_position(0)
             self.selector_stepper.do_homing_move(
@@ -723,7 +726,7 @@ class MMU3:
             self.idler_stepper.accel,
         )
 
-        if not self.enable_5in1:
+        if not self.enable_no_selector_mode:
             self.selector_stepper.do_move(
                 self.selector_positions[tool_id],
                 self.selector_speed,
@@ -1090,7 +1093,7 @@ class MMU3:
             return False
 
         self.display_status_msg("Loading filament from MMU to extruder ...")
-        if self.enable_5in1 is False and not self.load_filament_to_finda():
+        if self.enable_no_selector_mode is False and not self.load_filament_to_finda():
             return False
 
         if self.load_filament_from_finda_to_extruder():
@@ -1147,7 +1150,7 @@ class MMU3:
 
         self.display_status_msg("Unloading filament from extruder to FINDA ...")
         self.pulley_stepper.do_set_position(0)
-        if not self.enable_5in1:
+        if not self.enable_no_selector_mode:
             self.pulley_stepper.do_homing_move(
                 -self.bowden_unload_length,
                 self.bowden_unload_speed,
@@ -1196,7 +1199,7 @@ class MMU3:
         if not self.unload_filament_from_extruder_to_finda():
             return False
 
-        if self.enable_5in1:
+        if self.enable_no_selector_mode:
             self.display_status_msg("Unloading done from extruder to MMU")
             return True
 
@@ -1220,7 +1223,7 @@ class MMU3:
         if self.is_paused:
             return False
 
-        if self.enable_5in1:
+        if self.enable_no_selector_mode:
             self.display_status_msg("Cannot perform cut in 5in1 mode!")
             return False
 
@@ -1440,7 +1443,7 @@ class MMU3:
             if not self.validate_filament_not_stuck_in_extruder():
                 return False
 
-        if not self.enable_5in1:
+        if not self.enable_no_selector_mode:
             if self.is_filament_in_finda:
                 if not self.unload_filament_from_extruder():
                     return False
@@ -1779,7 +1782,7 @@ class MMU3:
             gcmd (GCodeCommand): The G-code command.
         """
         self.unload_tool()
-        if not self.enable_5in1:
+        if not self.enable_no_selector_mode:
             if not self.is_filament_in_finda:
                 self.unselect_tool()
                 self.display_status_msg("M702 ok ...")
