@@ -109,10 +109,11 @@ class MMU3:
         self.bowden_unload_length = config.getfloat("bowden_unload_length", 830)
         self.bowden_unload_speed = config.getint("bowden_unload_speed", 120)
         self.bowden_unload_accel = config.getint("bowden_unload_accel", 120)
-        # finda load/unload
+        # FINDA load/unload
         self.finda_load_retry = config.getint("finda_load_retry", 20)
         self.finda_load_length = config.getfloat("finda_load_length", 120)
-        self.finda_unload_length = config.getfloat("finda_unload_length", 35)
+        self.finda_unload_retry = config.getint("finda_unload_retry", 10)
+        self.finda_unload_length = config.getfloat("finda_unload_length", 30)
         self.finda_load_speed = config.getint("finda_load_speed", 20)
         self.finda_unload_speed = config.getint("finda_unload_speed", 20)
         self.finda_load_accel = config.getint("finda_load_accel", 50)
@@ -212,6 +213,7 @@ class MMU3:
         self.gcode.register_command("HOME_MMU", self.cmd_home_mmu)
         self.gcode.register_command("HOME_MMU_ONLY", self.cmd_home_mmu_only)
         self.gcode.register_command("PAUSE_MMU", self.cmd_pause)
+        self.gcode.register_command("RESUME_MMU", self.cmd_resume)
 
         for i in range(self.number_of_tools):
             self.gcode.register_command(f"T{i}", partial(self.cmd_tx, tool_id=i))
@@ -410,10 +412,10 @@ class MMU3:
 
     @property
     def is_filament_in_finda(self) -> bool:
-        """Return if the filament is in finda or not.
+        """Return if the filament is in FINDA or not.
 
         Returns:
-            bool: True if the filament is present in finda, False otherwise.
+            bool: True if the filament is present in FINDA, False otherwise.
         """
         print_time = self.toolhead.get_last_move_time()
         return bool(self.pulley_stepper_endstop.query_endstop(print_time))
@@ -464,7 +466,7 @@ class MMU3:
         """Validate filament is not stuck in extruder.
 
         Returns:
-            bool: True if the filament is not present in finda, False otherwise.
+            bool: True if the filament is not present in FINDA, False otherwise.
         """
         self.display_status_msg("Checking if filament stuck in extruder")
         if self.is_filament_present_in_extruder:
@@ -478,7 +480,7 @@ class MMU3:
         """Validate filament is in FINDA.
 
         Returns:
-            bool: True if filament is in finda, False otherwise.
+            bool: True if filament is in FINDA, False otherwise.
         """
         self.display_status_msg("Checking if filament in FINDA")
         if not self.is_filament_in_finda:
@@ -626,13 +628,13 @@ class MMU3:
         return True
 
     def load_filament_to_finda_in_loop(self) -> bool:
-        """Load the filament to finda in a infinite loop.
+        """Load the filament to FINDA in a infinite loop.
 
         Args:
             gcmd (GCodeCommand): The G-code command.
 
         Returns:
-            bool: True, if filament loaded to finda, False otherwise.
+            bool: True, if filament loaded to FINDA, False otherwise.
         """
         for i in range(self.finda_load_retry):
             self.pulley_stepper.do_set_position(0)
@@ -648,12 +650,12 @@ class MMU3:
             # check endstop status and exit from the loop
             if self.is_filament_in_finda:
                 self.display_status_msg(
-                    "Finda endstop triggered. Exiting filament load."
+                    "FINDA endstop triggered. Exiting filament load."
                 )
                 return True
-            self.display_status_msg(f"Finda endstop not triggered. Retrying... {i}")
+            self.display_status_msg(f"FINDA endstop not triggered. Retrying... {i + 1}")
         self.display_status_msg(
-            f"Couldn't load filament to finda after {self.finda_load_retry}!"
+            f"Couldn't load filament to FINDA after {self.finda_load_retry} tries!"
         )
         self.pause()
         return False
@@ -686,9 +688,16 @@ class MMU3:
             M300
             M300
             M300
+        """)
+
+    def resume(self) -> None:
+        """Resume the MMU."""
+        self.gcode.run_script_from_command(
+            """
             M118 End PAUSE
             RESTORE_GCODE_STATE NAME=PAUSE_MMU_state
-        """)
+            """
+        )
 
     def unlock(self) -> None:
         """Park the idler, stop the delayed stop of the heater.
@@ -1009,7 +1018,7 @@ class MMU3:
         PAUSE_MMU is called if the FINDA does not detect the filament
 
         Returns:
-            bool: True, if the filament is loaded to finda, False otherwise.
+            bool: True, if the filament is loaded to FINDA, False otherwise.
         """
         if self.is_paused:
             return False
@@ -1048,7 +1057,7 @@ class MMU3:
         """Load from the FINDA to the extruder gear.
 
         Returns:
-            bool: True, if filament is loaded from finda to extruder, False
+            bool: True, if filament is loaded from FINDA to extruder, False
                 otherwise.
         """
         if self.is_paused:
@@ -1099,7 +1108,7 @@ class MMU3:
         if self.load_filament_from_finda_to_extruder():
             self.display_status_msg("Loading done from MMU to extruder")
             return True
-        # there should be an error about loading from finda to extruder
+        # there should be an error about loading from FINDA to extruder
         return False
 
     def unload_filament_from_finda(self) -> None:
@@ -1109,7 +1118,7 @@ class MMU3:
         PAUSE_MMU is called if the FINDA does detect the filament.
 
         Returns:
-            bool: True, if filament unloaded from finda, False otherwise.
+            bool: True, if filament unloaded from FINDA, False otherwise.
         """
         if self.is_paused:
             return False
@@ -1137,7 +1146,7 @@ class MMU3:
         """Unload from extruder gear to the FINDA.
 
         Returns:
-            bool: True, if filament unloaded from extruder to finda.
+            bool: True, if filament unloaded from extruder to FINDA.
         """
         if self.is_paused:
             return False
@@ -1158,13 +1167,14 @@ class MMU3:
                 False,
                 False,
             )
-            # self.pulley_stepper.do_homing_move(
-            #     -self.bowden_unload_length,
-            #     self.bowden_unload_speed,
-            #     self.bowden_unload_accel,
-            #     False,
-            #     False,
-            # )
+
+            # if filament is still in finda, get into an unload loop...
+            if (
+                self.is_filament_in_finda
+                and not self.unload_filament_to_finda_in_loop()
+            ):
+                return False
+
             if not self.validate_filament_not_stuck_in_finda():
                 return False
         else:
@@ -1174,8 +1184,41 @@ class MMU3:
                 self.bowden_unload_accel,
             )
         self.disable_steppers(self.pulley_stepper)
-        self.display_status_msg("Unloading done from FINDA to extruder")
+        self.display_status_msg("Done unloading from FINDA!")
         return True
+
+    def unload_filament_to_finda_in_loop(self) -> bool:
+        """Unload the filament to FINDA in a loop.
+
+        Args:
+            gcmd (GCodeCommand): The G-code command.
+
+        Returns:
+            bool: True, if filament unloaded to FINDA, False otherwise.
+        """
+        for i in range(self.finda_unload_retry):
+            self.pulley_stepper.do_set_position(0)
+            self.pulley_stepper.do_homing_move(
+                -self.finda_unload_length,
+                self.finda_unload_speed,
+                self.finda_unload_accel,
+                False,
+                False,
+            )
+            self.toolhead.wait_moves()
+
+            # check endstop status and exit from the loop
+            if not self.is_filament_in_finda:
+                self.display_status_msg(
+                    "FINDA endstop triggered. Exiting filament unload."
+                )
+                return True
+            self.display_status_msg(f"FINDA endstop not triggered. Retrying... {i + 1}")
+        self.display_status_msg(
+            f"Couldn't unload filament to FINDA after {self.finda_unload_retry} tries!"
+        )
+        self.pause()
+        return False
 
     def unload_filament_from_extruder(self) -> bool:
         """Unload from the extruder gear to the MMU3.
@@ -1238,11 +1281,11 @@ class MMU3:
         if not self.select_tool(tool_id):
             return False
 
-        # Feed to finda
+        # Feed to FINDA
         if not self.load_filament_to_finda():
             return False
 
-        # Unload filament from finda
+        # Unload filament from FINDA
         if not self.unload_filament_from_finda():
             return False
 
@@ -1390,7 +1433,7 @@ class MMU3:
                     f"Also setting Current filament to {self.current_filament}"
                 )
                 return True
-            # filament is not in finda
+            # filament is not in FINDA
             self.display_status_msg("And no filament in FINDA")
             self.display_status_msg("No need to unload!")
             return True
@@ -1524,7 +1567,7 @@ class MMU3:
 
     @gcmd_grabber
     def cmd_load_filament_to_finda_in_loop(self, gcmd: GCodeCommand) -> None:
-        """Load the filament to finda in a infinite loop.
+        """Load the filament to FINDA in a infinite loop.
 
         Args:
             gcmd (GCodeCommand): The G-code command.
@@ -1543,6 +1586,15 @@ class MMU3:
             gcmd: (GCodeCommand): The G-code command.
         """
         self.pause()
+
+    @gcmd_grabber
+    def cmd_resume(self, gcmd: GCodeCommand) -> None:
+        """Resume the MMU.
+
+        Args:
+            gcmd: (GCodeCommand): The G-code command.
+        """
+        self.resume()
 
     @gcmd_grabber
     def cmd_tx(self, gcmd: GCodeCommand, tool_id: int = 0) -> None:
@@ -1564,6 +1616,8 @@ class MMU3:
         runout_pause = None
         if self.filament_sensor.runout_helper.runout_pause:
             self.respond_info("Disabling filament runout sensor!")
+            # TODO: Read the runout_pause from config as it might be disabled
+            #       as a result of load_tool() failing...
             runout_pause = self.filament_sensor.runout_helper.runout_pause
             self.filament_sensor.runout_helper.runout_pause = False
 
@@ -1574,7 +1628,8 @@ class MMU3:
             return
         self.respond_debug(f"self.current_tool    : {self.current_tool}")
         self.respond_debug(f"self.current_filament: {self.current_filament}")
-        self.load_tool(tool_id)
+        if not self.load_tool(tool_id):
+            return
         self.respond_debug(f"self.current_tool    : {self.current_tool}")
         self.respond_debug(f"self.current_filament: {self.current_filament}")
 
