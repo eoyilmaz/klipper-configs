@@ -1124,8 +1124,14 @@ class MMU3:
             return False
 
         if self.current_tool is None:
-            self.display_status_msg("Cannot unload from FINDA, tool not selected !!")
-            return False
+            if self.current_filament is not None:
+                # Auto select tool
+                self.select_tool(self.current_filament)
+            else:
+                self.display_status_msg(
+                    "Cannot unload from FINDA, tool not selected !!"
+                )
+                return False
 
         self.display_status_msg("Unloading filament from FINDA ...")
         self.pulley_stepper.do_set_position(0)
@@ -1152,10 +1158,14 @@ class MMU3:
             return False
 
         if self.current_tool is None:
-            self.display_status_msg(
-                "Cannot unload from extruder to FINDA, tool not selected !!"
-            )
-            return False
+            if self.current_filament is not None:
+                # Auto select tool
+                self.select_tool(self.current_filament)
+            else:
+                self.display_status_msg(
+                    "Cannot unload from extruder to FINDA, tool not selected !!"
+                )
+                return False
 
         self.display_status_msg("Unloading filament from extruder to FINDA ...")
         self.pulley_stepper.do_set_position(0)
@@ -1233,10 +1243,14 @@ class MMU3:
             return False
 
         if self.current_tool is None:
-            self.display_status_msg(
-                "Cannot unload from extruder to MMU, tool not selected !!"
-            )
-            return False
+            if self.current_filament is not None:
+                # Auto select tool
+                self.select_tool(self.current_filament)
+            else:
+                self.display_status_msg(
+                    "Cannot unload from extruder to MMU, tool not selected !!"
+                )
+                return False
 
         self.display_status_msg("Unloading filament from extruder to MMU ...")
         if not self.unload_filament_from_extruder_to_finda():
@@ -1394,32 +1408,6 @@ class MMU3:
 
         if self.current_filament is None:
             self.display_status_msg("Current filament is None!")
-            # so we don't know what tool we are in.
-            # we should try homing first
-            # and then try unloading_filament one_by_one
-
-            # for i in range(self.number_of_tools):
-            #     self.home_idler()
-            #     self.current_tool = i
-            #     self.respond_info(f"Trying UT {self.current_tool}")
-
-            #     self.current_tool = None
-
-            #     if not self.unload_filament_in_extruder():
-            #         continue
-            #     else:
-            #         break
-
-            # # now we can home the selector if the filament is not in the
-            # # extruder
-            # if self.validate_filament_not_stuck_in_extruder():
-            #     self.home_mmu()
-            #     self.current_tool = 0
-            #     self.select_tool(self.current_tool)
-            #     return True
-            # else:
-            #     self.current_tool = None
-            #     return False
             if self.is_filament_in_finda:
                 self.display_status_msg("Filament in FINDA!")
                 self.respond_info("But there is a filament in FINDA!")
