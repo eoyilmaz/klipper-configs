@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from configfile import ConfigWrapper
     from extras.display_status import DisplayStatus
     from extras.filament_switch_sensor import SwitchSensor
+    from extras.filament_motion_sensor import EncoderSensor
     from extras.heaters import Heater, PrinterHeaters
     from extras.query_endstops import QueryEndstops
     from gcode import GCodeCommand, GCodeDispatch
@@ -63,6 +64,7 @@ class MMU3:
         self.query_endstops: QueryEndstops = self.printer.load_object(
             config, "query_endstops"
         )
+        self.reactor = self.printer.get_reactor()
 
         self._mcu = None
         self._toolhead = None
@@ -162,10 +164,14 @@ class MMU3:
         )
         self.load_retry = config.getint("load_retry", 5)
         self.unload_retry = config.getint("unload_retry", 5)
-        self.filament_sensor_name = config.get(
-            "filament_sensor_name", "filament_switch_sensor my_filament_sensor"
+        self.filament_switch_sensor_name = config.get(
+            "filament_switch_sensor_name", "filament_switch_sensor my_filament_sensor"
         )
-        self._filament_sensor = None
+        self._filament_switch_sensor = None
+        self.filament_motion_sensor_name = config.get(
+            "filament_motion_sensor_name", "filament_motion_sensor encoder_sensor"
+        )
+        self._filament_motion_sensor = None
 
         # register commands
         self.register_commands()
@@ -389,26 +395,39 @@ class MMU3:
         return None
 
     @property
-    def filament_sensor(self) -> SwitchSensor:
-        """Return the RunoutHelper.
+    def filament_switch_sensor(self) -> SwitchSensor:
+        """Return the SwitchSensor.
 
         Returns:
-            RunoutHelper: The runout helper.
+            SwitchSensor: The switch sensor.
         """
-        if self._filament_sensor is None:
-            self._filament_sensor = self.printer.lookup_object(
-                self.filament_sensor_name
+        if self._filament_switch_sensor is None:
+            self._filament_switch_sensor = self.printer.lookup_object(
+                self.filament_switch_sensor_name
             )
-        return self._filament_sensor
+        return self._filament_switch_sensor
+
+    @property
+    def filament_motion_sensor(self) -> EncoderSensor:
+        """Return the EncoderSensor.
+
+        Returns:
+            EncoderSensor: The switch sensor.
+        """
+        if self._filament_motion_sensor is None:
+            self._filament_motion_sensor = self.printer.lookup_object(
+                self.filament_motion_sensor_name
+            )
+        return self._filament_motion_sensor
 
     @property
     def is_filament_present_in_extruder(self) -> bool:
-        """Return if the filament present in the extruder runout sensor.
+        """Return if the filament present in the extruder filament switch sensor.
 
         Returns:
             bool: True if filament sensor is triggered, False otherwise.
         """
-        return self.filament_sensor.get_status(None)["filament_detected"]
+        return self.filament_switch_sensor.get_status(None)["filament_detected"]
 
     @property
     def is_filament_in_finda(self) -> bool:
@@ -560,7 +579,12 @@ class MMU3:
         self.respond_debug(f"self.current_tool    : {self.current_tool}")
         self.respond_debug(f"self.current_filament: {self.current_filament}")
 
-        self.filament_sensor.runout_helper.sensor_enabled = False
+        filament_switch_sensor_state = None
+        if self.filament_switch_sensor and self.filament_switch_sensor.runout_helper.sensor_enabled:
+            self.respond_info("Disabling filament runout sensor!")
+            filament_switch_sensor_state = self.filament_switch_sensor.runout_helper.sensor_enabled
+            self.filament_switch_sensor.runout_helper.sensor_enabled = False
+
         self.is_homed = True
         self.display_status_msg("Homing MMU ...")
         if not self.eject_before_home():
@@ -573,6 +597,10 @@ class MMU3:
         self.respond_debug("After home_mmu_only inside home_mmu")
         self.respond_debug(f"self.current_tool    : {self.current_tool}")
         self.respond_debug(f"self.current_filament: {self.current_filament}")
+
+        if filament_switch_sensor_state is not None:
+            self.respond_info("Re-Enabling filament runout sensor!")
+            self.filament_switch_sensor.runout_helper.sensor_enabled = filament_switch_sensor_state
 
         return home_mmu_only_result
 
@@ -679,9 +707,6 @@ class MMU3:
             SAVE_GCODE_STATE NAME=PAUSE_MMU_state
             SET_IDLE_TIMEOUT TIMEOUT={self.timeout_pause}
             M118 Start PAUSE
-            M300
-            M300
-            M300
             PAUSE
             G90
             G1 X{self.pause_position[0]} Y{self.pause_position[1]} F3000
@@ -1601,29 +1626,76 @@ class MMU3:
         self.respond_debug(f"self.current_tool    : {self.current_tool}")
         self.respond_debug(f"self.current_filament: {self.current_filament}")
 
-        runout_pause = None
-        if self.filament_sensor.runout_helper.runout_pause:
+        filament_switch_sensor_state = None
+        if self.filament_switch_sensor and self.filament_switch_sensor.runout_helper.sensor_enabled:
             self.respond_info("Disabling filament runout sensor!")
-            # TODO: Read the runout_pause from config as it might be disabled
-            #       as a result of load_tool() failing...
-            runout_pause = self.filament_sensor.runout_helper.runout_pause
-            self.filament_sensor.runout_helper.runout_pause = False
+            filament_switch_sensor_state = self.filament_switch_sensor.runout_helper.sensor_enabled
+            self.filament_switch_sensor.runout_helper.sensor_enabled = False
+
+        filament_motion_sensor_state = None
+        if self.filament_motion_sensor and self.filament_motion_sensor.runout_helper.sensor_enabled:
+            self.respond_info("Disabling filament motion sensor!")
+            filament_motion_sensor_state = self.filament_motion_sensor.runout_helper.sensor_enabled
+            self.filament_motion_sensor.runout_helper.sensor_enabled = False
+
 
         if not self.unload_tool():
             self.respond_info("Apparently unload tool failed!")
             self.respond_debug(f"self.current_tool    : {self.current_tool}")
             self.respond_debug(f"self.current_filament: {self.current_filament}")
+
+            if filament_switch_sensor_state:
+                self.respond_info("Re-Enabling filament runout sensor!")
+                self.filament_switch_sensor.runout_helper.sensor_enabled = True
+
+            if filament_motion_sensor_state:
+                self.respond_info("Re-Enabling filament motion sensor!")
+                # also update the event time so that the runout doesn't trigger
+                # print_time = self.toolhead.get_last_move_time()
+                # self.filament_motion_sensor._update_filament_runout_pos()
+                event_time = self.reactor.monotonic() or self.toolhead.get_last_move_time()
+                self.filament_motion_sensor.encoder_event(event_time, None)
+                self.filament_motion_sensor.runout_helper.sensor_enabled = True
             return
+
         self.respond_debug(f"self.current_tool    : {self.current_tool}")
         self.respond_debug(f"self.current_filament: {self.current_filament}")
         if not self.load_tool(tool_id):
+            # TODO: if load fails, try unloading and loading again for several
+            #       times, most of the time unloading and loading again solves
+            #       the load issue especially after installing the filament
+            #       encoder the filament path become problematic.
+            #       Also after all attempts failed we can cut the tip of the
+            #       filament and try again...
+
+            if filament_switch_sensor_state:
+                self.respond_info("Re-Enabling filament runout sensor!")
+                self.filament_switch_sensor.runout_helper.sensor_enabled = True
+
+            if filament_motion_sensor_state:
+                self.respond_info("Re-Enabling filament motion sensor!")
+                # also update the event time so that the runout doesn't trigger
+                # print_time = self.toolhead.get_last_move_time()
+                # self.filament_motion_sensor._update_filament_runout_pos()
+                event_time = self.reactor.monotonic() or self.toolhead.get_last_move_time()
+                self.filament_motion_sensor.encoder_event(event_time, None)
+                self.filament_motion_sensor.runout_helper.sensor_enabled = True
             return
         self.respond_debug(f"self.current_tool    : {self.current_tool}")
         self.respond_debug(f"self.current_filament: {self.current_filament}")
 
-        if runout_pause is not None:
+        if filament_switch_sensor_state:
             self.respond_info("Re-Enabling filament runout sensor!")
-            self.filament_sensor.runout_helper.runout_pause = runout_pause
+            self.filament_switch_sensor.runout_helper.sensor_enabled = True
+
+        if filament_motion_sensor_state:
+            self.respond_info("Re-Enabling filament motion sensor!")
+            # also update the event time so that the runout doesn't trigger
+            # print_time = self.toolhead.get_last_move_time()
+            # self.filament_motion_sensor._update_filament_runout_pos(print_time)
+            event_time = self.reactor.monotonic() or self.toolhead.get_last_move_time()
+            self.filament_motion_sensor.encoder_event(event_time, None)
+            self.filament_motion_sensor.runout_helper.sensor_enabled = True
 
         self.display_status_msg(f"Done T{tool_id}")
 
